@@ -70,15 +70,15 @@ bool disaster_init(void)
 	log_hook(log_android);
 #endif
 
+	RAssert(config_init());
+	RAssert(log_init());
+
 	Info("--------------------------------");
 	Info(LOG_RED "Better" LOG_BLU "Server " LOG_RST "v" STRINGIFY(BUILD_VERSION));
 	Info("Build from " LOG_PUR __DATE__ " " LOG_GRN __TIME__);
 	Info("(c) 2024 Team Exe Empire");
 	Info("--------------------------------");
 	Info("");
-
-	RAssert(config_init());
-	RAssert(log_init());
 
 	RAssert(dylist_create(&servers, g_config.server_count));
 	for (int32_t i = 0; i < g_config.server_count; i++)

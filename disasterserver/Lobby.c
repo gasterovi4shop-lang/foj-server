@@ -169,7 +169,6 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		server_send_msg(v->server, v->peer, CLRCODE_RED "`reserve ~server if \\inf's ~server downed");
 		server_send_msg(v->server, v->peer, "build from " CLRCODE_PUR __DATE__ " " CLRCODE_GRN __TIME__ CLRCODE_RST);
 		server_send_msg(v->server, v->peer, msg);
-		server_send_msg(v->server, v->peer, "this is a server for @pre-alpha ~test, before releasing");
 		server_send_msg(v->server, v->peer, CLRCODE_GRA "report <bugs ~to /gaster_blaster ~in >telegram");
 		server_send_msg(v->server, v->peer, g_config.motd);
 

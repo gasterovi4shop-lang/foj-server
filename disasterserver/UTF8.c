@@ -2,7 +2,9 @@
 
 utf8_char utf8_tolower(utf8_char c)
 {
-    if(c >= 0x0410 && c <= 0x042F)
+    if(c == 0x0401) // cyrillic Yo -> yo
+        return 0x0451;
+    else if(c >= 0x0410 && c <= 0x042F)
         return c + 0x20;
     else if(c <= 0x7F)
         return tolower((int)c);

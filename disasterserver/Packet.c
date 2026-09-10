@@ -40,10 +40,78 @@ size_t string_length(String* str)
 
 String string_lower(String str)
 {
-	for (int i = 0; i < str.len; i++)
-		str.value[i] = (char)tolower(str.value[i]);
+	// the client sprite font only has lowercase glyphs (a-z, cyrillic a-ya),
+	// and tolower() knows nothing about utf-8 cyrillic: decode every codepoint,
+	// lowercase ascii + cyrillic A-Ya + Yo, then re-encode
+	String out = str;
+	size_t write = 0;
 
-	return str;
+	for (int i = 0; i < (int)str.len; )
+	{
+		unsigned char c = str.value[i];
+		uint32_t cp;
+		int seq;
+
+		if (c == '\0')
+			break;
+
+		if (c <= 0x7F) { cp = c; seq = 1; }
+		else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; seq = 2; }
+		else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; seq = 3; }
+		else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; seq = 4; }
+		else { cp = c; seq = 1; }
+
+		bool truncated = false;
+		for (int j = 1; j < seq; j++)
+		{
+			if (i + j >= (int)str.len || str.value[i + j] == '\0')
+			{
+				truncated = true;
+				break;
+			}
+
+			cp = (cp << 6) | (str.value[i + j] & 0x3F);
+		}
+
+		if (!truncated)
+		{
+			if (cp >= 'A' && cp <= 'Z')
+				cp += 32;
+			else if (cp >= 0x0410 && cp <= 0x042F) // cyrillic uppercase -> lowercase
+				cp += 0x20;
+			else if (cp == 0x0401) // Yo -> yo
+				cp = 0x0451;
+		}
+
+		if (cp <= 0x7F)
+			out.value[write++] = (char)cp;
+		else if (cp <= 0x7FF)
+		{
+			out.value[write++] = (char)(0xC0 | (cp >> 6));
+			out.value[write++] = (char)(0x80 | (cp & 0x3F));
+		}
+		else if (cp <= 0xFFFF)
+		{
+			out.value[write++] = (char)(0xE0 | (cp >> 12));
+			out.value[write++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+			out.value[write++] = (char)(0x80 | (cp & 0x3F));
+		}
+		else
+		{
+			out.value[write++] = (char)(0xF0 | (cp >> 18));
+			out.value[write++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+			out.value[write++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+			out.value[write++] = (char)(0x80 | (cp & 0x3F));
+		}
+
+		i += seq;
+	}
+
+	// keep the original byte length semantics (len includes the terminator)
+	if (write < sizeof(out.value))
+		out.value[write] = '\0';
+
+	return out;
 }
 
 bool packet_new(Packet* packet, PacketType type)

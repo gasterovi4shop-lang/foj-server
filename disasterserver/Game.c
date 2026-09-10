@@ -14,8 +14,11 @@
 #include <entities/CreamRing.h>
 #include <entities/BlackRing.h>
 #include <entities/TailsProjectile.h>
+#include <entities/RMZShard.h>
+#include <entities/RMZSlug.h>
 #include <entities/EggmanTracker.h>
 #include <entities/ExellerClone.h>
+#include <entities/DTStalactits.h>
 
 bool game_end(Server* server, Ending ending, bool achiv)
 {
@@ -162,6 +165,9 @@ bool game_init(int exe, int8_t map, Server* server)
 		for (int i = 0; i < 5; i++)
 			v->plr.revival_init[i] = -1;
 	}
+
+	//the flags were reset above, push the empty spectator list to every client
+	game_broadcast_spectators(server);
 
 	Packet pack;
 	PacketCreate(&pack, SERVER_LOBBY_GAME_START);
@@ -542,6 +548,99 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 		// NOTE: deliberately no in_game check, spectators are not in_game
 		if (!v->server->game.started)
 			break;
+
+		// live rings, cream rings, slugs and the tails projectile exist on every map
+		for (size_t i = 0; i < v->server->game.entities.capacity; i++)
+		{
+			Entity* ent = (Entity*)v->server->game.entities.ptr[i];
+			if (!ent)
+				continue;
+
+			Packet pack;
+
+			if (strcmp(ent->tag, "ring") == 0)
+			{
+				Ring* ring = (Ring*)ent;
+
+				PacketCreate(&pack, SERVER_RING_STATE);
+				PacketWrite(&pack, packet_write8, 0);
+				PacketWrite(&pack, packet_write8, ring->rid);
+				PacketWrite(&pack, packet_write16, ring->id);
+				PacketWrite(&pack, packet_write8, ring->red);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+			else if (strcmp(ent->tag, "cring") == 0)
+			{
+				CreamRing* ring = (CreamRing*)ent;
+
+				PacketCreate(&pack, SERVER_RING_STATE);
+				PacketWrite(&pack, packet_write8, 2);
+				PacketWrite(&pack, packet_write16, (uint16_t)ring->pos.x);
+				PacketWrite(&pack, packet_write16, (uint16_t)ring->pos.y);
+				PacketWrite(&pack, packet_write8, ring->rid);
+				PacketWrite(&pack, packet_write16, ring->id);
+				PacketWrite(&pack, packet_write8, ring->red);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+			else if (strcmp(ent->tag, "slug") == 0)
+			{
+				Slug* slug = (Slug*)ent;
+
+				PacketCreate(&pack, SERVER_RMZSLIME_STATE);
+				PacketWrite(&pack, packet_write8, 0);
+				PacketWrite(&pack, packet_write16, slug->id);
+				PacketWrite(&pack, packet_write16, (uint16_t)slug->pos.x);
+				PacketWrite(&pack, packet_write16, (uint16_t)slug->pos.y);
+				PacketWrite(&pack, packet_write8, (uint8_t)slug->state);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+			else if (strcmp(ent->tag, "tproj") == 0)
+			{
+				TProjectile* tproj = (TProjectile*)ent;
+
+				PacketCreate(&pack, SERVER_TPROJECTILE_STATE);
+				PacketWrite(&pack, packet_write8, 0);
+				PacketWrite(&pack, packet_write16, (uint16_t)tproj->pos.x);
+				PacketWrite(&pack, packet_write16, (uint16_t)tproj->pos.y);
+				PacketWrite(&pack, packet_write16, tproj->owner);
+				PacketWrite(&pack, packet_write8, tproj->dir);
+				PacketWrite(&pack, packet_write8, tproj->damage);
+				PacketWrite(&pack, packet_write8, tproj->exe);
+				PacketWrite(&pack, packet_write8, tproj->charge);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+			else if (strcmp(ent->tag, "dttits") == 0)
+			{
+				DTStalactits* tits = (DTStalactits*)ent;
+
+				if (!tits->show && !tits->state)
+					continue;
+
+				PacketCreate(&pack, SERVER_DTASS_STATE);
+				PacketWrite(&pack, packet_write8, 0);
+				PacketWrite(&pack, packet_write8, tits->sid);
+				PacketWrite(&pack, packet_write16, (uint16_t)tits->pos.x);
+				PacketWrite(&pack, packet_write16, (uint16_t)tits->pos.y);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+			else if (strcmp(ent->tag, "shard") == 0)
+			{
+				Shard* shard = (Shard*)ent;
+				PacketCreate(&pack, SERVER_RMZSHARD_STATE);
+				PacketWrite(&pack, packet_write8, shard->spawned);
+				PacketWrite(&pack, packet_write16, shard->id);
+				PacketWrite(&pack, packet_write16, (uint16_t)shard->pos.x);
+				PacketWrite(&pack, packet_write16, (uint16_t)shard->pos.y);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+			else if (strcmp(ent->tag, "bring") == 0)
+			{
+				PacketCreate(&pack, SERVER_BRING_STATE);
+				PacketWrite(&pack, packet_write8, 0);
+				PacketWrite(&pack, packet_write16, ent->id);
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+		}
 
 		switch (v->server->game.map)
 		{

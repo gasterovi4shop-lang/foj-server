@@ -82,8 +82,21 @@ bool log_init(void)
 		time_t t = time(NULL);
 		struct tm* p = localtime(&t);
 
-		char fname[64];
-		strftime(fname, 64, "logs/%m%d%Y %H%M%S.log", p);
+		char base[64];
+		char fname[128];
+		strftime(base, sizeof(base), "logs/%m%d%Y_%H%M%S", p);
+		snprintf(fname, sizeof(fname), "%s.log", base);
+
+		// Keep every server run in its own file, including runs started
+		// within the same second.
+		int suffix = 1;
+		FILE* previous = fopen(fname, "r");
+		while (previous)
+		{
+			fclose(previous);
+			snprintf(fname, sizeof(fname), "%s_%d.log", base, suffix++);
+			previous = fopen(fname, "r");
+		}
 
 		logFile = fopen(fname, "w");
 		RAssert(logFile);

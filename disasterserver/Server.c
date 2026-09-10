@@ -123,27 +123,18 @@ bool peer_identity_process(PeerData *v, const char *addr, bool is_banned, uint64
 			RAssert(packet_send(v->peer, &pack, true));
 		}
 
-		// For other players in queue
-		PacketCreate(&pack, SERVER_WAITING_PLAYER_INFO);
-		PacketWrite(&pack, packet_write8, 0);
-		PacketWrite(&pack, packet_write16, v->id);
-		PacketWrite(&pack, packet_writestr, v->nickname);
-		PacketWrite(&pack, packet_write8, v->lobby_icon);
-		RAssert(server_broadcast_ex(v->server, &pack, true, v->id));
-
 		char msg[100];
 		snprintf(msg, 100, "server " CLRCODE_RED "%d" CLRCODE_RST " of " CLRCODE_BLU "%d" CLRCODE_RST, v->server->id + 1, g_config.server_count);
 
-		server_send_msg(v->server, v->peer, "server for @pre-alpha >td2dr: friends of jimbo");
+		server_send_msg(v->server, v->peer, "-----------------------");
 		server_send_msg(v->server, v->peer, CLRCODE_RED "better/server~ v" STRINGIFY(BUILD_VERSION));
 		server_send_msg(v->server, v->peer, "build from " CLRCODE_PUR __DATE__ " " CLRCODE_GRN __TIME__ CLRCODE_RST);
 		server_send_msg(v->server, v->peer, msg);
-		server_send_msg(v->server, v->peer, "this is a server for @pre-alpha ~test, before releasing");
-		server_send_msg(v->server, v->peer, CLRCODE_GRA "report <bugs ~to /gaster_blaster ~in >telegram");
+		server_send_msg(v->server, v->peer, "-----------------------");
 		server_send_msg(v->server, v->peer, g_config.motd);
 
 		if (v->op)
-			server_send_msg(v->server, v->peer, CLRCODE_GRN "вам дали путёвку в гастерович шоп" CLRCODE_RST);
+			server_send_msg(v->server, v->peer, CLRCODE_GRN "you're an operator on this server" CLRCODE_RST);
 
 		if (v->server->state >= ST_GAME)
 		{
@@ -185,7 +176,8 @@ bool peer_identity(PeerData *v, Packet *packet)
 	v->disconnecting = false;
 	v->mod_tool = false;
 	v->is_mobile = false;
-	v->nickname = nickname;
+	//the client sprite font has no uppercase glyphs, force nicknames lowercase
+	v->nickname = string_lower(nickname);
 	v->udid = udid;
 	v->lobby_icon = lobby_icon;
 	v->pet = pet;
@@ -464,18 +456,25 @@ bool server_disconnect(Server *server, ENetPeer *peer, DisconnectReason reason, 
 		if (data->disconnecting)
 			return true;
 
-		// FIXME: crashes v110 too lazy to fix
-		// if(reason == DR_OTHER && text != NULL)
-		// {
-		// 	Packet pack;
-		// 	PacketCreate(&pack, SERVER_PLAYER_FORCE_DISCONNECT);
-		// 	PacketWrite(&pack, packet_write8, reason);
-		// 	PacketWrite(&pack, packet_writestr, __Str(text));
-		// 	packet_send(peer, &pack, true);
-		// 	enet_peer_disconnect_later(peer, reason);
-		// }
-		// else
-		enet_peer_disconnect(peer, reason);
+		char reason_text[256];
+		if (text)
+			snprintf(reason_text, sizeof(reason_text), "%s", text);
+		else if (reason == DR_VERMISMATCH)
+			snprintf(reason_text, sizeof(reason_text), "Version outdated: please update your game.");
+		else
+			snprintf(reason_text, sizeof(reason_text), "Disconnected by server. Reason code: %d.", reason);
+
+		Packet pack;
+		PacketCreate(&pack, SERVER_PLAYER_FORCE_DISCONNECT);
+		PacketWrite(&pack, packet_write8, reason);
+		PacketWrite(&pack, packet_writestr, __Str(reason_text));
+		if (!packet_send(peer, &pack, true))
+		{
+			enet_peer_disconnect(peer, reason);
+			return false;
+		}
+
+		enet_peer_disconnect_later(peer, reason);
 
 		if (!text)
 		{
@@ -692,7 +691,7 @@ unsigned long server_cmd_parse(String *string)
 
 	for (int i = 0; i < string->len; i++)
 	{
-		// Приведение к unsigned char предотвращает передачу отрицательных значений
+		// пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅ unsigned char пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
 		if (!found_digit && isspace((unsigned char)string->value[i]))
 			continue;
 		else

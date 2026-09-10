@@ -17,7 +17,7 @@ bool charselect_check_state(Server *server)
 		if (!peer->in_game)
 			continue;
 
-		if (peer->exe_char == CH_NONE && peer->surv_char == EX_NONE)
+		if (peer->exe_char == EX_NONE && peer->surv_char == CH_NONE)
 			should = false;
 	}
 
