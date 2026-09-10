@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define TICKSPERSEC 60
-#define BUILD_VERSION 0015
+#define BUILD_VERSION 1111
 
 #define STR_HELPER(x) #x
 #define STRINGIFY(x) STR_HELPER(x)
