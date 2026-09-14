@@ -33,6 +33,7 @@ typedef struct PeerData
 	Player plr;
 	String nickname;
 	String udid;
+	char accid[12]; // server-side short account id (salted hash of udid)
 	uint8_t lobby_icon;
 	int8_t pet;
 
@@ -199,6 +200,16 @@ bool server_state_handle(PeerData *v, Packet *packet);
 bool server_msg_handle(Server *server, PacketType type, PeerData *v, Packet *packet);
 bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *msg);
 unsigned long server_cmd_parse(String *string);
+
+// shared ban/kick mechanics for the chat commands, the host panel and the console
+bool parse_duration(const char* str, uint64_t* out_seconds, bool* forever);
+bool server_host_ban(Server* server, const char* nick, const char* dur, const char* reason, char* confirm, size_t cap);
+bool server_host_kick(Server* server, const char* nick, const char* reason, char* confirm, size_t cap);
+
+// ban by account id (udid): persists in Bans.json, works for players
+// that already left; if the player is online they get dropped instantly
+bool server_host_ban_udid(const char* udid, const char* dur, const char* reason, char* confirm, size_t cap);
+bool server_host_unban(const char* key, char* confirm, size_t cap);
 
 bool server_worker(Server *server);
 bool server_broadcast(Server *server, Packet *packet, bool reliable);

@@ -35,7 +35,7 @@ void lobby_check_vote(Server* server)
 			server_broadcast_msg(server, buffer);
 
 			timeout_set(server->lobby.kick_target.nickname.value, server->lobby.kick_target.udid.value, server->lobby.kick_target.ip.value, time(NULL) + 60);
-			server_disconnect_id(server, server->lobby.kick_target.id, DR_KICKEDBYHOST, NULL);
+			server_disconnect_id(server, server->lobby.kick_target.id, DR_KICKEDBYHOST, "You're kicked by vote.");
 			break;
 		}
 

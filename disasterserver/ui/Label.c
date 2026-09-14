@@ -1,4 +1,4 @@
-#include <ui/Components.h>
+﻿#include <ui/Components.h>
 #include <UTF8.h>
 
 bool label_update(SDL_Renderer* renderer, struct _Component* component)
@@ -30,7 +30,17 @@ bool label_update(SDL_Renderer* renderer, struct _Component* component)
 
 		case '-':
 		case '_':
+		case 0x2013: // en dash
+		case 0x2014: // em dash
 			ind = 26;
+			break;
+
+		case '"':
+			ind = 39;
+			break;
+
+		case ';':
+			ind = 40;
 			break;
 
 		case ',':
@@ -142,11 +152,53 @@ bool label_update(SDL_Renderer* renderer, struct _Component* component)
 			clr = COLOR_ORG;
 			continue;
 
+		case 0xE000: // literal / (inside links)
+			ind = 79;
+			break;
+
+		case 0xE001: // literal &
+			ind = 77;
+			break;
+
+		case 0xE002: // literal ~
+			ind = 80;
+			break;
+
+		case 0xE003: // literal \ or |
+			ind = 26;
+			break;
+
+		case 0xE004: // literal |
+			ind = 26;
+			break;
+
+		case 0xE005: // literal @
+			ind = 44;
+			break;
+
+		case 0xE006: // literal `
+			ind = 39;
+			break;
+
+		case 0xE007: // literal №
+			ind = 44;
+			break;
+
+		case 0xE008: // literal <
+			ind = 41;
+			break;
+
+		case 0xE009: // literal >
+			ind = 42;
+			break;
+
 		default:
 			if(c >= 'a' && c <= 'z')
 				ind = c - 97;
 			else if(c >= 0x0430 && c <= 0x044F)
 				ind = c - 0x0430 + 45;
+			else if(c == 0x0451) // cyrillic yo: the atlas has no glyph, use е
+				ind = 50;
 			else
 				ind = 44;
 			break;

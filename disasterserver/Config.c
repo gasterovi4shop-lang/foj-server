@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <io/Dir.h>
 
 #ifdef SYS_ANDROID
@@ -26,6 +27,9 @@ SERVER_API Config g_config =
 	.ping_limit = 250,
 #endif
 
+	.news_port = 1500,
+	.admin_port = 1489,
+	.news_enabled = true,
 	.log_debug = false,
 	.log_file = false,
 	.map_list = { true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true },
@@ -151,10 +155,17 @@ bool config_init(void)
 	g_config.port =			(int32_t)cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(json, "port"));
 	g_config.server_count = (int32_t)cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(json, "server_count"));
 	g_config.ping_limit =	(int32_t)cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(json, "ping_limit"));
+	g_config.news_port =	(int32_t)cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(json, "news_port"));
+	g_config.admin_port =	(int32_t)cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(json, "admin_port"));
+	g_config.news_enabled =	cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "news_enabled"));
 	g_config.log_file =		cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "log_file"));
 	g_config.log_debug =	cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "log_debug"));
 	g_config.anticheat =	cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "anticheat"));
 	g_config.pride =		cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "pride"));
+
+	// configs made before the news feature lack the keys: fall back to defaults
+	if (g_config.news_port <= 0 || g_config.news_port > 65535)
+		g_config.news_port = 1500;
 
 	snprintf(g_config.motd, 256, "%s", cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "motd")));
 	cJSON_Delete(json);
@@ -184,6 +195,9 @@ SERVER_API bool config_save(void)
 	cJSON_AddItemToObject(json, "port", cJSON_CreateNumber(g_config.port));
 	cJSON_AddItemToObject(json, "server_count", cJSON_CreateNumber(g_config.server_count));
 	cJSON_AddItemToObject(json, "ping_limit", cJSON_CreateNumber(g_config.ping_limit));
+	cJSON_AddItemToObject(json, "news_port", cJSON_CreateNumber(g_config.news_port));
+	cJSON_AddItemToObject(json, "admin_port", cJSON_CreateNumber(g_config.admin_port));
+	cJSON_AddItemToObject(json, "news_enabled", cJSON_CreateBool(g_config.news_enabled));
 	cJSON_AddItemToObject(json, "log_file", cJSON_CreateBool(g_config.log_file));
 	cJSON_AddItemToObject(json, "log_debug", cJSON_CreateBool(g_config.log_debug));
 	cJSON_AddItemToObject(json, "pride", cJSON_CreateBool(g_config.pride));
@@ -194,30 +208,41 @@ SERVER_API bool config_save(void)
 	return true;
 }
 
-bool ban_add(const char* nickname, const char* udid, const char* ip)
+static void ban_store(cJSON* root, const char* key, const char* nickname, uint64_t expires, const char* reason)
+{
+	// re-bans overwrite the old entry, which also migrates the pre-1.2 plain-string format
+	cJSON_DeleteItemFromObject(root, key);
+
+	cJSON* js = cJSON_CreateObject();
+	cJSON_AddStringToObject(js, "nickname", nickname ? nickname : "");
+	cJSON_AddNumberToObject(js, "expires", (double)expires);
+	cJSON_AddStringToObject(js, "reason", reason ? reason : "");
+	cJSON_AddItemToObject(root, key, js);
+}
+
+bool ban_add(const char* nickname, const char* udid, const char* ip, uint64_t expires, const char* reason)
 {
 	bool res = true;
 
 	MutexLock(g_banMut);
 	{
+		// the latest ban wins: overwriting also migrates the pre-1.2 plain-string format
 		bool changed = false;
-		if (!cJSON_HasObjectItem(g_bans, ip))
+
+		if (ip && ip[0])
 		{
-			cJSON* js = cJSON_CreateString(nickname);
-			cJSON_AddItemToObject(g_bans, ip, js);
+			ban_store(g_bans, ip, nickname, expires, reason);
 			changed = true;
 		}
 
-		if (!cJSON_HasObjectItem(g_bans, udid))
+		if (udid && udid[0])
 		{
-			cJSON* js = cJSON_CreateString(nickname);
-			cJSON_AddItemToObject(g_bans, udid, js);
+			ban_store(g_bans, udid, nickname, expires, reason);
 			changed = true;
 		}
 
 		if (changed)
 			res = collection_save(BANS_FILE, g_bans);
-		
 	}
 	MutexUnlock(g_banMut);
 
@@ -244,7 +269,7 @@ bool ban_revoke(const char* udid, const char* ip)
 			changed = true;
 		}
 
-		if(changed)
+		if (changed)
 			res = collection_save(BANS_FILE, g_bans);
 	}
 	MutexUnlock(g_banMut);
@@ -252,16 +277,108 @@ bool ban_revoke(const char* udid, const char* ip)
 	return res;
 }
 
-bool ban_check(const char* udid, const char* ip, bool* result)
+static bool ban_read(const char* key, BanInfo* info)
 {
-	*result = false;
+	if (!key || !key[0])
+		return false;
+
+	cJSON* obj = cJSON_GetObjectItemCaseSensitive(g_bans, key);
+	if (!obj)
+		return false;
+
+	if (cJSON_IsString(obj))
+	{
+		// pre-1.2 format: plain string value, always a permanent ban without reason
+		const char* nick = cJSON_GetStringValue(obj);
+		snprintf(info->nickname, sizeof(info->nickname), "%s", nick ? nick : "");
+		info->expires = 0;
+		info->reason[0] = '\0';
+		info->banned = true;
+		return true;
+	}
+
+	if (cJSON_IsObject(obj))
+	{
+		const char* nick = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "nickname"));
+		const char* reason = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(obj, "reason"));
+		cJSON* expires = cJSON_GetObjectItemCaseSensitive(obj, "expires");
+
+		snprintf(info->nickname, sizeof(info->nickname), "%s", nick ? nick : "");
+		snprintf(info->reason, sizeof(info->reason), "%s", reason ? reason : "");
+		info->expires = expires ? (uint64_t)cJSON_GetNumberValue(expires) : 0;
+		info->banned = true;
+		return true;
+	}
+
+	return false;
+}
+
+bool ban_check(const char* udid, const char* ip, BanInfo* info)
+{
+	memset(info, 0, sizeof(BanInfo));
 
 	MutexLock(g_banMut);
 	{
-		if (cJSON_HasObjectItem(g_bans, udid) || cJSON_HasObjectItem(g_bans, ip))
-			*result = true;
+		if (!ban_read(ip, info))
+			ban_read(udid, info);
+
+		// lift expired bans on sight, same as the timeout system
+		if (info->banned && info->expires != 0 && (uint64_t)time(NULL) >= info->expires)
+		{
+			if (ip && ip[0])
+				cJSON_DeleteItemFromObject(g_bans, ip);
+
+			if (udid && udid[0])
+				cJSON_DeleteItemFromObject(g_bans, udid);
+
+			collection_save(BANS_FILE, g_bans);
+			memset(info, 0, sizeof(BanInfo));
+		}
 	}
 	MutexUnlock(g_banMut);
+
+	return true;
+}
+
+bool ban_build_message(const BanInfo* info, char* buffer, size_t size)
+{
+	if (info->expires == 0)
+	{
+		if (info->reason[0] != '\0')
+			snprintf(buffer, size, "You're banned forever. Reason: %s", info->reason);
+		else
+			snprintf(buffer, size, "You're banned forever.");
+	}
+	else
+	{
+		uint64_t left = info->expires - (uint64_t)time(NULL);
+		if ((int64_t)left < 0)
+			left = 0;
+
+		uint64_t days = left / 86400;
+		uint64_t hours = (left % 86400) / 3600;
+		uint64_t minutes = (left % 3600) / 60;
+
+		char duration[64];
+		if (days > 0)
+			snprintf(duration, sizeof(duration), "%llud %lluh %llum", (unsigned long long)days, (unsigned long long)hours, (unsigned long long)minutes);
+		else if (hours > 0)
+			snprintf(duration, sizeof(duration), "%lluh %llum", (unsigned long long)hours, (unsigned long long)minutes);
+		else
+			snprintf(duration, sizeof(duration), "%llum", (unsigned long long)minutes);
+
+		// expiry date in local server time
+		char until[32] = "";
+		time_t end = (time_t)info->expires;
+		struct tm* tmv = localtime(&end);
+		if (tmv && strftime(until, sizeof(until), "%Y-%m-%d %H:%M", tmv) == 0)
+			until[0] = '\0';
+
+		if (info->reason[0] != '\0')
+			snprintf(buffer, size, "You're banned for %s (until %s). Reason: %s", duration, until, info->reason);
+		else
+			snprintf(buffer, size, "You're banned for %s (until %s).", duration, until);
+	}
 
 	return true;
 }

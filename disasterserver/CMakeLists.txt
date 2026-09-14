@@ -36,7 +36,10 @@ set(SOURCES
 	"DyList.c"
 	"Log.c"
 	"Lib.c"
+	"News.c"
 	"Server.c"
+	"Console.c"
+	"Admin.c"
 	"Vote.c"
 	"Maps.c"
 	"Packet.c"
@@ -137,6 +140,8 @@ else()
 				"ui/MapListPreset.c"
 				"ui/PingPreset.c"
 				"ui/PlayerList.c"
+				"ui/NewsUi.c"
+				"ui/PanelInput.c"
 			)
 
 			if (WIN32)

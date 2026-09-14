@@ -135,4 +135,58 @@ typedef struct
 bool playerlist_bans_update(SDL_Renderer* renderer, struct _Component* component);
 bool playerlist_op_update(SDL_Renderer* renderer, struct _Component* component);
 
+// news tab: single-line text input for the notification text
+typedef struct
+{
+	COMPONENT_BODY;
+	bool clicked;
+} NewsTextInput;
+#define NewsTextInputCreate(x, y, w, h) (NewsTextInput) { x, y, w, h, newstext_update, false }
+bool newstext_update(SDL_Renderer* renderer, struct _Component* component);
+
+// news tab: centered transient status line ("sent!" etc)
+typedef struct
+{
+	COMPONENT_BODY;
+} NewsStatus;
+#define NewsStatusCreate() (NewsStatus) { 0, 0, 0, 0, newsstatus_update }
+bool newsstatus_update(SDL_Renderer* renderer, struct _Component* component);
+
+// news tab: list of recently sent notifications (right-side section)
+typedef struct
+{
+	COMPONENT_BODY;
+} NewsList;
+#define NewsListCreate(x, y, w, h) (NewsList) { x, y, w, h, newslist_update }
+bool newslist_update(SDL_Renderer* renderer, struct _Component* component);
+
+// news tab text entry state (fed from the SDL event loop in ui/Main.c)
+void news_text_input(const char* text);
+void news_text_key(SDL_Keycode key);
+void news_set_status(const char* text);
+
+extern char g_newsText[2048];
+extern int g_newsTextLen;
+extern char g_newsStatus[64];
+extern bool g_newsOpen;
+
+// players tab: generic single-line input for the ban duration and reason
+typedef struct
+{
+	COMPONENT_BODY;
+	bool clicked;
+	char* buffer;			// куда пишется текст
+	int   cap;				// размер буфера
+	int   limit;			// максимум символов
+	const char* placeholder;
+} PanelInput;
+#define PanelInputCreate(x, y, w, h, buf, cap, limit, placeholder) (PanelInput) { x, y, w, h, panelinput_update, false, buf, cap, limit, placeholder }
+bool panelinput_update(SDL_Renderer* renderer, struct _Component* component);
+void panelinput_text(const char* text);
+void panelinput_key(SDL_Keycode key);
+extern PanelInput* g_panelFocus;
+
+extern char g_banDur[32];
+extern char g_banReason[128];
+
 #endif

@@ -110,7 +110,7 @@ static bool jp_open(Server* server)
 
 bool jp_init(Server* server)
 {
-	RAssert(map_time(server, 3.42 * TICKSPERSEC, 20)); //205
+	RAssert(map_time(server, (2 * TICKSPERSEC) + 25, 25)); //145
 	RAssert(map_ring(server, 5));
 	RAssert(game_spawn(server, (Entity*)&(MakeSpike()), sizeof(SpikeController), NULL));
 	server->game.jp_gamble_failed_rolls = 0;

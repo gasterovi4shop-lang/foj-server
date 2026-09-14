@@ -13,12 +13,14 @@
 	#define BANS_FILE "Bans.json"
 	#define OPERATORS_FILE "Operators.json"
 	#define TIMEOUTS_FILE "Timeouts.json"
+	#define NEWS_FILE "News.json"
 #else
 	#define ANDROID_DIR "/data/data/com.teamexeempire.disaster2d/files/"
 	#define CONFIG_FILE ANDROID_DIR "Config.json"
 	#define BANS_FILE ANDROID_DIR "Bans.json"
 	#define OPERATORS_FILE ANDROID_DIR "Operators.json"
 	#define TIMEOUTS_FILE ANDROID_DIR "Timeouts.json"
+	#define NEWS_FILE ANDROID_DIR "News.json"
 #endif
 
 typedef struct
@@ -26,6 +28,9 @@ typedef struct
 	int32_t port;
 	int32_t	server_count;
 	int32_t ping_limit;
+	int32_t news_port;
+	int32_t admin_port;
+	bool	news_enabled;
 	bool	log_debug;
 	bool	log_file;
 	bool	anticheat;
@@ -47,9 +52,19 @@ SERVER_API extern Mutex	g_opMut;
 SERVER_API bool	config_init(void);
 SERVER_API bool config_save(void);
 
-SERVER_API bool	ban_add(const char* nickname, const char* udid, const char* ip);
+// expires == 0 means the ban is permanent
+typedef struct
+{
+	bool		banned;
+	uint64_t	expires;
+	char		reason[128];
+	char		nickname[32];
+} BanInfo;
+
+SERVER_API bool	ban_add(const char* nickname, const char* udid, const char* ip, uint64_t expires, const char* reason);
 SERVER_API bool	ban_revoke(const char* udid, const char* ip);
-SERVER_API bool	ban_check(const char* udid, const char* ip, bool* result);
+SERVER_API bool	ban_check(const char* udid, const char* ip, BanInfo* info);
+SERVER_API bool	ban_build_message(const BanInfo* info, char* buffer, size_t size);
 
 SERVER_API bool	timeout_set(const char* nickname, const char* udid, const char* ip, uint64_t timestamp);
 SERVER_API bool	timeout_revoke(const char* udid, const char* ip);
@@ -59,6 +74,15 @@ SERVER_API bool	op_add(const char* nickname, const char* ip);
 SERVER_API bool	op_revoke(const char* ip);
 SERVER_API bool	op_check(const char* ip, bool* result);
 
-bool collection_save(const char* file, cJSON* value);
+SERVER_API bool	collection_save(const char* file, cJSON* value);
+SERVER_API bool	collection_init(cJSON** output, const char* file, const char* default_value);
+
+// news server ("новостник"): plain TCP listener on g_config.news_port that
+// hands the stored notification list to clients asking for it
+SERVER_API bool news_init(void);
+SERVER_API bool news_push(const char* text);
+SERVER_API size_t news_count(void);
+SERVER_API bool news_get(size_t index, uint32_t* id, char* out, size_t cap);
+SERVER_API bool news_delete(uint32_t id);
 
 #endif

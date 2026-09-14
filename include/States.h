@@ -35,6 +35,11 @@ typedef struct Entity
 #define CMD_N 1536
 #define CMD_INFO 45719004
 #define CMD_LOBBY 1420085352
+#define CMD_MYID 45848821
+#define CMD_FORCEESC 1696769598
+#define CMD_FORCEEXE 3221390709
+#define CMD_RETURN 1236067038
+#define CMD_MYID 45848821
 
 bool lobby_init				(Server* server);
 bool lobby_state_join		(PeerData* v);

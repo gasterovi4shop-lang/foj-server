@@ -7,7 +7,7 @@
 #include <States.h>
 #include <DyList.h>
 #include <Config.h>
-
+#include <Admin.h>
 ThreadVar		g_threadName;
 DyList			servers;
 bool 			running = 0;
@@ -72,6 +72,8 @@ bool disaster_init(void)
 
 	RAssert(config_init());
 	RAssert(log_init());
+	RAssert(news_init());
+	RAssert(admin_init());
 
 	Info("--------------------------------");
 	Info(LOG_RED "Better" LOG_BLU "Server " LOG_RST "v" STRINGIFY(BUILD_VERSION));
@@ -166,8 +168,8 @@ bool disaster_server_ban(Server* server, uint16_t id)
 
 		if (v->id == id)
 		{
-			server_disconnect(server, v->peer, DR_BANNEDBYHOST, NULL);
-			return ban_add(v->nickname.value, v->udid.value, v->ip.value);
+			server_disconnect(server, v->peer, DR_BANNEDBYHOST, "You're banned forever.");
+			return ban_add(v->nickname.value, v->udid.value, v->ip.value, 0, NULL);
 		}
 	}
 
@@ -204,7 +206,7 @@ bool disaster_server_timeout(Server* server, uint16_t id, double timeout)
 
 		if (v->id == id)
 		{
-			server_disconnect(server, v->peer, DR_KICKEDBYHOST, NULL);
+			server_disconnect(server, v->peer, DR_KICKEDBYHOST, "You're kicked.");
 			return timeout_set(v->nickname.value, v->udid.value, v->ip.value, time(NULL) + (uint64_t)(round(timeout)));
 		}
 	}

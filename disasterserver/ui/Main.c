@@ -3,6 +3,7 @@
 #include <ui/Main.h>
 #include <ui/Components.h>
 #include <ui/Presets.h>
+#include <Console.h>
 #include <io/Threads.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
@@ -19,25 +20,34 @@ enum
 	UST_MAIN,
 	UST_OPTIONS,
 	UST_PLAYERS,
-	UST_INFO
+	UST_INFO,
+	UST_NEWS
 }		state;
-char	text_buffer[40][256];
+char	text_buffer[256][256];
 char 	info_text[1024];
 int		text_index = 0;
 int		text_length = 0;
+int		text_scroll = 0;	//прокрутка лога: 0 - свежайшие, больше - старые строки
 int 	g_mouseWheel = 0;
 int 	g_pmouseWheel = 0;
+
+// поля бана/кика на вкладке Players
+char g_banDur[32] = "";
+char g_banReason[128] = "";
 
 void init_info();
 bool main_menu(Component* component);
 bool options_menu(Component* component);
 bool players_menu(Component* component);
 bool info_menu(Component* component);
+bool news_menu(Component* component);
+bool toggle_recent(Component* component);
 
 bool back_to_lobby(Component* component);
 bool practice_mode(Component* component);
 bool force_exe_win(Component* component);
 bool force_surv_win(Component* component);
+bool send_news(Component* component);
 
 bool map_list_changed(Component* component);
 bool map_list_reset(Component* component);
@@ -52,6 +62,7 @@ Component* main_components[] =
 	(Component*)&(ButtonCreate(150, 249, 54, 8, options_menu, 480, 408, 54, 8)),
 	(Component*)&(ButtonCreate(268, 249, 53, 8, players_menu, 480, 416, 53, 8)),
 	(Component*)&(ButtonCreate(386, 249, 29, 8, info_menu, 480, 424, 29, 8)),
+	(Component*)&(ButtonCreate(432, 249, 34, 8, news_menu, 640, 420, 34, 8)),
 
 	(Component*)&(ButtonCreate(320, 106, 128, 20, back_to_lobby, 400, 0, 128, 20)),
 	(Component*)&(ButtonCreate(320, 136, 128, 20, practice_mode, 400 + 256, 0, 128, 20)),
@@ -75,6 +86,12 @@ Component* options_components[] =
 	(Component*)&(PingLimitCreate(320, 125, 128, 40)),
 	(Component*)&(TButtonCreate(320, 172, 128, 20, (ButtonCallback)config_save, &g_config.anticheat, true, 3120, 0, 128, 20)),
 	(Component*)&(TButtonCreate(320, 200, 128, 20, (ButtonCallback)config_save, &g_config.pride, false, 2736, 0, 128, 20)),
+
+	(Component*)&(ButtonCreate(59, 249, 32, 8, main_menu, 480, 400, 32, 8)),
+	(Component*)&(ButtonCreate(150, 249, 54, 8, options_menu, 480, 408, 54, 8)),
+	(Component*)&(ButtonCreate(268, 249, 53, 8, players_menu, 480, 416, 53, 8)),
+	(Component*)&(ButtonCreate(386, 249, 29, 8, info_menu, 480, 424, 29, 8)),
+	(Component*)&(ButtonCreate(432, 249, 34, 8, news_menu, 640, 420, 34, 8)),
 };
 
 Component* players_components[] =
@@ -86,10 +103,16 @@ Component* players_components[] =
 	(Component*)&(PlayerListConfigCreate(168, 48, playerlist_op_update)),
 	(Component*)&(PlayerListConfigCreate(320, 48, playerlist_bans_update)),
 
+	(Component*)&(LabelCreate(16, 233, "|ban time:", 2)),
+	(Component*)&(PanelInputCreate(48, 231, 100, 14, g_banDur, 32, 16, "|12h/perm")),
+	(Component*)&(LabelCreate(156, 233, "|reason:", 2)),
+	(Component*)&(PanelInputCreate(196, 231, 130, 14, g_banReason, 128, 100, "|reason")),
+
 	(Component*)&(ButtonCreate(59, 249, 32, 8, main_menu, 480, 400, 32, 8)),
 	(Component*)&(ButtonCreate(150, 249, 54, 8, options_menu, 480, 408, 54, 8)),
 	(Component*)&(ButtonCreate(268, 249, 53, 8, players_menu, 480, 416, 53, 8)),
 	(Component*)&(ButtonCreate(386, 249, 29, 8, info_menu, 480, 424, 29, 8)),
+	(Component*)&(ButtonCreate(432, 249, 34, 8, news_menu, 640, 420, 34, 8)),
 };
 
 Component* info_components[] =
@@ -102,6 +125,26 @@ Component* info_components[] =
 	(Component*)&(ButtonCreate(150, 249, 54, 8, options_menu, 480, 408, 54, 8)),
 	(Component*)&(ButtonCreate(268, 249, 53, 8, players_menu, 480, 416, 53, 8)),
 	(Component*)&(ButtonCreate(386, 249, 29, 8, info_menu, 480, 424, 29, 8)),
+	(Component*)&(ButtonCreate(432, 249, 34, 8, news_menu, 640, 420, 34, 8)),
+};
+
+Component* news_components[] =
+{
+	(Component*)&(ImageCreate(0, 0, 480, 270, 0, 272, 480, 270)),
+	(Component*)&(LabelCreate(227, 6, "news", 2)),
+
+	(Component*)&(LabelCreate(6, 10, "|notification text:", 2)),
+	(Component*)&(NewsTextInputCreate(4, 20, 472, 16)),
+	(Component*)&(ButtonCreate(176, 44, 128, 20, send_news, 640, 384, 128, 20)),
+	(Component*)&(NewsStatusCreate()),
+	(Component*)&(ButtonCreate(176, 92, 128, 20, toggle_recent, 896, 384, 128, 20)),
+	(Component*)&(NewsListCreate(304, 44, 172, 180)),
+
+	(Component*)&(ButtonCreate(59, 249, 32, 8, main_menu, 480, 400, 32, 8)),
+	(Component*)&(ButtonCreate(150, 249, 54, 8, options_menu, 480, 408, 54, 8)),
+	(Component*)&(ButtonCreate(268, 249, 53, 8, players_menu, 480, 416, 53, 8)),
+	(Component*)&(ButtonCreate(386, 249, 29, 8, info_menu, 480, 424, 29, 8)),
+	(Component*)&(ButtonCreate(432, 249, 34, 8, news_menu, 640, 420, 34, 8)),
 };
 
 void log_msg(const char* type, const char* message)
@@ -117,18 +160,18 @@ void log_msg(const char* type, const char* message)
 	else
 		snprintf(msg, 512, "~%s", message);
 
-	if (text_length > 39)
+	if (text_length > 255)
 	{
-		for (int i = 1; i < 40; i++)
+		for (int i = 1; i < 256; i++)
 			strncpy(text_buffer[i - 1], text_buffer[i], 255);
 	}
 
 	strncpy(text_buffer[text_index], msg, 255);
 
-	if (text_index < 39)
+	if (text_index < 255)
 		text_index++;
 
-	if (text_length < 40)
+	if (text_length < 256)
 		text_length++;
 }
 
@@ -148,6 +191,8 @@ int console_loop(void)
 	AllocConsole();
 	(void)freopen("CONOUT$", "w", stdout);
 #endif
+
+	console_start();
 
 	return server_loop();
 }
@@ -199,6 +244,7 @@ int main(int argc, char** argv)
 	log_hook(log_msg);
 	SDL_RenderSetLogicalSize(renderer, 480 * INTERFACE_SCALE, 270 * INTERFACE_SCALE);
 	SDL_RenderSetVSync(renderer, true);
+	SDL_StartTextInput();
 
 	Label label;
 	Thread thr;
@@ -221,9 +267,23 @@ int main(int argc, char** argv)
 			case SDL_MOUSEWHEEL:
 				g_mouseWheel = ev.wheel.y;
 				break;
+
+				case SDL_TEXTINPUT:
+					if (state == UST_NEWS)
+						news_text_input(ev.text.text);
+					if (state == UST_PLAYERS)
+						panelinput_text(ev.text.text);
+					break;
+
+				case SDL_KEYDOWN:
+					if (state == UST_NEWS)
+						news_text_key(ev.key.keysym.sym);
+					if (state == UST_PLAYERS)
+						panelinput_key(ev.key.keysym.sym);
+					break;
 			}
 		}
-		
+
 		SDL_RenderClear(renderer);
 		{
 			SDL_Rect src = (SDL_Rect){ 480 + ((int)bg / 3 % 28) * 96, 446, 96, 96 };
@@ -243,9 +303,35 @@ int main(int argc, char** argv)
 				for (int i = 0; i < sizeof(main_components) / sizeof(Component*); i++)
 					main_components[i]->update(renderer, main_components[i]);
 
-				for (int i = 0; i < text_length; i++)
+				//прокрутка лога колесом, пока курсор над панелью лога
 				{
-					label = LabelCreate(23 * 2, 55 * 2 + i * 8, text_buffer[i], 1);
+					int mx, my;
+					float sx, sy;
+					SDL_GetMouseState(&mx, &my);
+					SDL_RenderGetScale(renderer, &sx, &sy);
+					mx = (int)(mx / sx);
+					my = (int)(my / sy);
+
+					if (mx >= 32 && mx < 584 && my >= 96 && my < 448)
+						text_scroll += g_mouseWheel;
+				}
+
+				int visible = 40;
+				int max_scroll = text_length - visible;
+				if (max_scroll < 0)
+					max_scroll = 0;
+				if (text_scroll > max_scroll)
+					text_scroll = max_scroll;
+				if (text_scroll < 0)
+					text_scroll = 0;
+
+				int base = text_length - visible - text_scroll;
+				if (base < 0)
+					base = 0;
+
+				for (int i = 0; i < visible && base + i < text_length; i++)
+				{
+					label = LabelCreate(23 * 2, 55 * 2 + i * 8, text_buffer[base + i], 1);
 					label.update(renderer, (Component*)&label);
 				}
 
@@ -272,6 +358,14 @@ int main(int argc, char** argv)
 			{
 				for (int i = 0; i < sizeof(info_components) / sizeof(Component*); i++)
 					info_components[i]->update(renderer, info_components[i]);
+
+				break;
+			}
+
+			case UST_NEWS:
+			{
+				for (int i = 0; i < sizeof(news_components) / sizeof(Component*); i++)
+					news_components[i]->update(renderer, news_components[i]);
 
 				break;
 			}
@@ -329,6 +423,38 @@ bool players_menu(Component* component)
 bool info_menu(Component* component)
 {
 	state = UST_INFO;
+	return true;
+}
+
+bool news_menu(Component* component)
+{
+	state = UST_NEWS;
+	return true;
+}
+
+bool toggle_recent(Component* component)
+{
+	g_newsOpen = !g_newsOpen;
+	return true;
+}
+
+bool send_news(Component* component)
+{
+	if (g_newsText[0] == '\0')
+	{
+		news_set_status("\type something first");
+		return true;
+	}
+
+	if (news_push(g_newsText))
+	{
+		g_newsText[0] = '\0';
+		g_newsTextLen = 0;
+		news_set_status("@notification sent");
+	}
+	else
+		news_set_status("\failed to save notification");
+
 	return true;
 }
 
@@ -550,8 +676,8 @@ bool ui_button_kick(struct _Component* component)
 			if(strcmp(peer->udid.value, button->peer.udid.value) != 0)
 				continue;
 
-			server_disconnect(server, peer->peer, DR_KICKEDBYHOST, NULL);
-			res = timeout_set(peer->nickname.value, peer->udid.value, peer->ip.value, time(NULL) + 5);
+			char confirm[256];
+			server_host_kick(server, peer->nickname.value, g_banReason, confirm, sizeof(confirm));
 		}
 	}
 	MutexUnlock(server->state_lock);
@@ -565,6 +691,7 @@ bool ui_button_ban(struct _Component* component)
 	PlayerButton* button = (PlayerButton*)component;
 	Server* server = disaster_get(lobby);
 
+	char errbox[256] = "";
 	bool res = true;
 	MutexLock(server->state_lock);
 	{
@@ -583,11 +710,21 @@ bool ui_button_ban(struct _Component* component)
 			if(strcmp(peer->udid.value, button->peer.udid.value) != 0)
 				continue;
 
-			server_disconnect(server, peer->peer, DR_BANNEDBYHOST, NULL);
-			res = ban_add(peer->nickname.value, peer->udid.value, peer->ip.value);
+			char confirm[256];
+			if (!server_host_ban(server, peer->nickname.value, g_banDur, g_banReason, confirm, sizeof(confirm)))
+			{
+				snprintf(errbox, sizeof(errbox), "%s", confirm);
+				break;
+			}
 		}
 	}
 	MutexUnlock(server->state_lock);
+
+	if (errbox[0] != '\0')
+	{
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Ban", errbox, NULL);
+		return false;
+	}
 
 	RAssert(res);
 	return false;
