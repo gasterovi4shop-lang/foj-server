@@ -14,12 +14,18 @@
 //   {"cmd":"players","server":0}          -> {"ok":true,"players":[...]}
 //   {"cmd":"cmds"}                        -> {"ok":true,"cmds":[...]}
 //   {"cmd":"cmdlog"}                      -> {"ok":true,"log":[...]}
+//   {"cmd":"chat_lobbies"}                -> {"lobbies":[{"id":0,"online":0,"state":"lobby"}]}
+//   {"cmd":"chatlog","server":0}          -> {"messages":[...]}
 //   {"cmd":"joins"}                       -> {"ok":true,"joins":[...]}
 //   {"cmd":"known","offset":0,"limit":100}
 //                                         -> {"players":[{"id":"...","nick":"..."}]}
 //   {"cmd":"exec","server":0,"line":".ban x 1h griefing"}
 //                                         -> {"ok":true,"output":"..."}
 SERVER_API bool admin_init(void);
+
+// records every client chat line, including dot commands, for the admin API
+SERVER_API void admin_log_chat(int server, const char* nick, const char* accid,
+	int player_id, const char* text);
 
 // called by the server when a player passes all checks and joins a lobby;
 // kept in a ring buffer, exposed through the "joins" admin command

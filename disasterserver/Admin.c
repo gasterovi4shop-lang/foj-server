@@ -26,12 +26,60 @@
 // Слушатель админ-команд: тот же принцип, что у "новостника" (News.c).
 // Клиент (телеграм-бот) шлёт одну json-строку и получает одну json-строку.
 #define ADMIN_MAX_LINE	4096
+#define EVENTLOG_CAP 512
+
+typedef struct
+{
+	char time[24];
+	char nick[32];
+	char accid[16];
+	char text[128];
+	int server;
+	int player_id;
+	bool command;
+} ChatLogEntry;
+
+static ChatLogEntry g_events[EVENTLOG_CAP];
+static int g_events_head;
+static bool g_events_full;
+static Mutex g_eventMut;
+
+static bool event_is_command(const char* text)
+{
+	while (text && (*text == ' ' || *text == '\t'))
+		text++;
+	return text && text[0] == '.';
+}
 
 // MutexLock внутри развернётся в "return false" - поэтому функции bool, а не void
 static bool status_lock(Server* server)
 {
 	MutexLock(server->state_lock);
 	return true;
+}
+
+SERVER_API void admin_log_chat(int server, const char* nick, const char* accid,
+	int player_id, const char* text)
+{
+	if (!text)
+		return;
+
+	MutexLock(g_eventMut);
+	{
+		ChatLogEntry* e = &g_events[g_events_head];
+		time_t now = time(NULL);
+		strftime(e->time, sizeof(e->time), "%Y-%m-%dT%H:%M:%S", localtime(&now));
+		snprintf(e->nick, sizeof(e->nick), "%s", nick ? nick : "");
+		snprintf(e->accid, sizeof(e->accid), "%s", accid ? accid : "");
+		snprintf(e->text, sizeof(e->text), "%s", text);
+		e->server = server;
+		e->player_id = player_id;
+		e->command = event_is_command(text);
+		g_events_head = (g_events_head + 1) % EVENTLOG_CAP;
+		if (g_events_head == 0)
+			g_events_full = true;
+	}
+	MutexUnlock(g_eventMut);
 }
 
 static const char* state_name(int state)
@@ -81,6 +129,36 @@ static cJSON* handle_status(void)
 		cJSON_AddNumberToObject(item, "id", i);
 		cJSON_AddNumberToObject(item, "online", total);
 		cJSON_AddNumberToObject(item, "ingame", ingame);
+		cJSON_AddStringToObject(item, "state", state_name(server->state));
+		cJSON_AddItemToArray(arr, item);
+	}
+
+	return resp;
+}
+
+static cJSON* handle_chat_lobbies(void)
+{
+	cJSON* resp = cJSON_CreateObject();
+	cJSON* arr = cJSON_AddArrayToObject(resp, "lobbies");
+
+	for (int i = 0; i < disaster_count(); i++)
+	{
+		Server* server = disaster_get(i);
+		if (!server)
+			continue;
+
+		int online = 0;
+		status_lock(server);
+		{
+			for (size_t p = 0; p < server->peers.capacity; p++)
+				if (server->peers.ptr[p])
+					online++;
+		}
+		MutexUnlock(server->state_lock);
+
+		cJSON* item = cJSON_CreateObject();
+		cJSON_AddNumberToObject(item, "id", i);
+		cJSON_AddNumberToObject(item, "online", online);
 		cJSON_AddStringToObject(item, "state", state_name(server->state));
 		cJSON_AddItemToArray(arr, item);
 	}
@@ -646,6 +724,29 @@ static cJSON* handle_cmdlog(void)
 	cJSON* resp = cJSON_CreateObject();
 	cJSON* arr = cJSON_AddArrayToObject(resp, "log");
 
+	MutexLock(g_eventMut);
+	{
+		int total = g_events_full ? EVENTLOG_CAP : g_events_head;
+		for (int i = 0; i < total; i++)
+		{
+			int idx = (g_events_head - 1 - i + EVENTLOG_CAP * 2) % EVENTLOG_CAP;
+			ChatLogEntry* e = &g_events[idx];
+			if (!e->command)
+				continue;
+
+			cJSON* item = cJSON_CreateObject();
+			cJSON_AddStringToObject(item, "time", e->time);
+			cJSON_AddNumberToObject(item, "server", e->server);
+			cJSON_AddStringToObject(item, "nick", e->nick);
+			cJSON_AddStringToObject(item, "accid", e->accid);
+			cJSON_AddNumberToObject(item, "player_id", e->player_id);
+			cJSON_AddStringToObject(item, "line", e->text);
+			cJSON_AddStringToObject(item, "src", "game");
+			cJSON_AddItemToArray(arr, item);
+		}
+	}
+	MutexUnlock(g_eventMut);
+
 	ConsoleCmdLog entries[CMDLOG_CAP];
 	int n = console_cmdlog_get(entries, CMDLOG_CAP);
 
@@ -657,6 +758,35 @@ static cJSON* handle_cmdlog(void)
 		cJSON_AddStringToObject(item, "line", entries[i].line);
 		cJSON_AddItemToArray(arr, item);
 	}
+
+	return resp;
+}
+
+static cJSON* handle_chatlog(int server)
+{
+	cJSON* resp = cJSON_CreateObject();
+	cJSON* arr = cJSON_AddArrayToObject(resp, "messages");
+
+	MutexLock(g_eventMut);
+	{
+		int total = g_events_full ? EVENTLOG_CAP : g_events_head;
+		for (int i = 0; i < total; i++)
+		{
+			int idx = (g_events_head - 1 - i + EVENTLOG_CAP * 2) % EVENTLOG_CAP;
+			ChatLogEntry* e = &g_events[idx];
+			if (server >= 0 && e->server != server)
+				continue;
+
+			cJSON* item = cJSON_CreateObject();
+			cJSON_AddStringToObject(item, "time", e->time);
+			cJSON_AddStringToObject(item, "nick", e->nick);
+			cJSON_AddStringToObject(item, "accid", e->accid);
+			cJSON_AddNumberToObject(item, "id", e->player_id);
+			cJSON_AddStringToObject(item, "text", e->text);
+			cJSON_AddItemToArray(arr, item);
+		}
+	}
+	MutexUnlock(g_eventMut);
 
 	return resp;
 }
@@ -757,6 +887,8 @@ static void admin_client_thread(void* arg)
 		{
 			const char* cmd = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "cmd"));
 			cJSON* jsrv = cJSON_GetObjectItemCaseSensitive(req, "server");
+			if (!cJSON_IsNumber(jsrv))
+				jsrv = cJSON_GetObjectItemCaseSensitive(req, "lobby");
 			int srv = cJSON_IsNumber(jsrv) ? (int)cJSON_GetNumberValue(jsrv) : 0;
 
 			if (cmd && strcmp(cmd, "status") == 0)
@@ -767,6 +899,10 @@ static void admin_client_thread(void* arg)
 				resp = handle_cmds();
 			else if (cmd && strcmp(cmd, "cmdlog") == 0)
 				resp = handle_cmdlog();
+			else if (cmd && strcmp(cmd, "chat_lobbies") == 0)
+				resp = handle_chat_lobbies();
+			else if (cmd && strcmp(cmd, "chatlog") == 0)
+				resp = handle_chatlog(srv);
 			else if (cmd && strcmp(cmd, "joins") == 0)
 				resp = handle_joins();
 			else if (cmd && strcmp(cmd, "news") == 0)
@@ -911,6 +1047,8 @@ static void admin_listen_thread(void* arg)
 
 SERVER_API bool admin_init(void)
 {
+	MutexCreate(g_eventMut);
+
 	if (g_config.admin_port <= 0 || g_config.admin_port > 65535)
 		return true; // feature disabled
 

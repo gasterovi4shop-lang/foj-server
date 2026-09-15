@@ -43,7 +43,7 @@ static void account_id(const char* udid, char* out, size_t cap)
 {
 	char buf[192];
 	snprintf(buf, sizeof(buf), "%s|%s", ACC_SALT, udid ? udid : "");
-	snprintf(out, cap, "%08llX", (unsigned long long)(acc_fnv1a(buf) & 0xFFFFFFFFULL));
+	snprintf(out, cap, "%08llx", (unsigned long long)(acc_fnv1a(buf) & 0xFFFFFFFFULL));
 }
 
 bool peer_identity_process(PeerData *v, const char *addr, const BanInfo *ban, uint64_t timeout, bool do_timeout)
@@ -196,12 +196,18 @@ bool peer_identity(PeerData *v, Packet *packet)
 	PacketRead(pet, packet, packet_read8, int8_t);
 
 	account_id(udid.value, v->accid, sizeof(v->accid));
+	RAssert(custom_id_get(v->accid, v->custom_id, sizeof(v->custom_id)));
 
 	RAssert(ban_check(udid.value, v->ip.value, &ban));
 	if (!ban.banned)
 		ban_check(v->accid, "", &ban); // ban by short account id
 	RAssert(timeout_check(udid.value, v->ip.value, &timeout));
 	RAssert(op_check(v->ip.value, &v->op));
+	{
+		bool id_op = false;
+		RAssert(op_id_check(v->accid, &id_op));
+		v->op = v->op || id_op;
+	}
 
 	v->should_timeout = true;
 	v->disconnecting = false;
@@ -1034,6 +1040,86 @@ bool server_host_ban_udid(const char* udid, const char* dur, const char* reason,
 	return true;
 }
 
+// поиск по ID: короткий accid или старый udid, по всем лобби хоста
+static PeerData* host_find_peer_by_id(Server** out_srv, const char* id)
+{
+	PeerData* target = NULL;
+	for (int i = 0; i < disaster_count() && !target; i++)
+	{
+		Server* srv = disaster_get(i);
+		if (!srv)
+			continue;
+
+		mut_lock(&srv->state_lock);
+		{
+			for (size_t p = 0; p < srv->peers.capacity; p++)
+			{
+				PeerData* peer = (PeerData*)srv->peers.ptr[p];
+				if (peer && (strcmp(peer->accid, id) == 0 || strcmp(peer->udid.value, id) == 0))
+				{
+					target = peer;
+					*out_srv = srv;
+					break;
+				}
+			}
+		}
+		mut_unlock(&srv->state_lock);
+	}
+	return target;
+}
+
+bool server_host_kick_id(const char* id, const char* reason, char* confirm, size_t cap)
+{
+	if (!id || id[0] == '\0')
+	{
+		snprintf(confirm, cap, CLRCODE_RED "usage: .kickid <id> [reason]" CLRCODE_RST);
+		return false;
+	}
+
+	Server* srv = NULL;
+	PeerData* target = host_find_peer_by_id(&srv, id);
+	if (!target)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "player '%s' isn't online" CLRCODE_RST, id);
+		return false;
+	}
+
+	char kickmsg[192];
+	if (reason && reason[0])
+		snprintf(kickmsg, sizeof(kickmsg), "You're kicked. Reason: %s", reason);
+	else
+		snprintf(kickmsg, sizeof(kickmsg), "You're kicked.");
+
+	RAssert(timeout_set(target->nickname.value, target->udid.value, target->ip.value, time(NULL) + 60));
+	server_disconnect(srv, target->peer, DR_KICKEDBYHOST, kickmsg);
+
+	if (reason && reason[0])
+		snprintf(confirm, cap, CLRCODE_GRN "%s kicked by id: %s" CLRCODE_RST, target->nickname.value, reason);
+	else
+		snprintf(confirm, cap, CLRCODE_GRN "%s kicked by id" CLRCODE_RST, target->nickname.value);
+
+	return true;
+}
+
+bool server_host_op_id(const char* id, char* confirm, size_t cap)
+{
+	if (!id || id[0] == '\0')
+	{
+		snprintf(confirm, cap, CLRCODE_RED "usage: .opid <id>" CLRCODE_RST);
+		return false;
+	}
+
+	if (!op_id_add(id))
+	{
+		snprintf(confirm, cap, CLRCODE_RED "failed to save operator" CLRCODE_RST);
+		return false;
+	}
+
+	Info("%s opped by account id", id);
+	snprintf(confirm, cap, CLRCODE_GRN "account %s is now an operator" CLRCODE_RST, id);
+	return true;
+}
+
 bool server_host_unban(const char* key, char* confirm, size_t cap)
 {
 	if (!key || key[0] == '\0')
@@ -1304,8 +1390,92 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 	{
 		// id видит только запросивший игрок - server_send_msg шлет лично
 		char idmsg[96];
-		snprintf(idmsg, sizeof(idmsg), CLRCODE_GRN "Your ID: " CLRCODE_RST "%s", v->accid);
+		const char* display_id = v->custom_id[0] ? v->custom_id : v->accid;
+		if (v->custom_id[0] && strcmp(v->custom_id, v->accid) != 0)
+			snprintf(idmsg, sizeof(idmsg), CLRCODE_GRN "Your ID: " CLRCODE_RST "%s (%s)", display_id, v->accid);
+		else
+			snprintf(idmsg, sizeof(idmsg), CLRCODE_GRN "Your ID: " CLRCODE_RST "%s", display_id);
 		RAssert(server_send_msg(v->server, v->peer, idmsg));
+		break;
+	}
+
+	case CMD_SET_ID:
+	{
+		char custom_id[64];
+		if (sscanf(msg->value, "%*s %63s", custom_id) != 1)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "usage: .set_id <id> (3-18 letters, digits, _ or -)"));
+			break;
+		}
+
+		if (!custom_id_set(v->accid, custom_id))
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "invalid or occupied id: use 3-18 letters, digits, _ or -"));
+			break;
+		}
+
+		snprintf(v->custom_id, sizeof(v->custom_id), "%s", custom_id);
+		for (char* p = v->custom_id; *p; p++)
+			*p = (char)tolower((unsigned char)*p);
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRN "custom id updated"));
+		break;
+	}
+
+	case CMD_RESET_ID:
+	{
+		char id[32];
+		int has_id = sscanf(msg->value, "%*s %31s", id) == 1;
+		if (has_id && !v->op)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "you aren't an operator."));
+			break;
+		}
+
+		if (!has_id)
+			snprintf(id, sizeof(id), "%s", v->accid);
+
+		if (id[0] == '\0')
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "unable to determine system id"));
+			break;
+		}
+
+		for (char* p = id; *p; p++)
+			*p = (char)tolower((unsigned char)*p);
+
+		if (!custom_id_reset(id))
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "failed to reset custom id"));
+			break;
+		}
+
+		for (int i = 0; i < disaster_count(); i++)
+		{
+			Server* target_server = disaster_get(i);
+			if (!target_server)
+				continue;
+
+			/*
+			 * Chat commands are handled while v->server->state_lock is
+			 * already held. Locking the current server again deadlocks the
+			 * worker thread when .reset_id is used.
+			 */
+			bool already_locked = target_server == v->server;
+			if (!already_locked)
+				MutexLock(target_server->state_lock);
+			{
+				for (size_t p = 0; p < target_server->peers.capacity; p++)
+				{
+					PeerData* peer = (PeerData*)target_server->peers.ptr[p];
+					if (peer && strcmp(peer->accid, id) == 0)
+						snprintf(peer->custom_id, sizeof(peer->custom_id), "%s", peer->accid);
+				}
+			}
+			if (!already_locked)
+				MutexUnlock(target_server->state_lock);
+		}
+
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRN "custom id reset"));
 		break;
 	}
 
@@ -1339,6 +1509,9 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 		snprintf(lobby_msg, 128, CLRCODE_GRA ".lobby" CLRCODE_RST " choose lobby (1-%d)", disaster_count());
 
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".info" CLRCODE_RST " server info"));
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".myid" CLRCODE_RST " show your system account id"));
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".set_id <id>" CLRCODE_RST " customize result-screen id (3-18 chars)"));
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".reset_id [system_id]" CLRCODE_RST " reset your custom id; operators may specify another id"));
 		RAssert(server_send_msg(v->server, v->peer, lobby_msg));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vk" CLRCODE_RST " vote kick"));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vp" CLRCODE_RST " vote practice mode"));
@@ -1349,8 +1522,12 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 			RAssert(server_send_msg(v->server, v->peer, lobby_msg));
 
 			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".kick [nick] [reason]" CLRCODE_RST " kick someone ig"));
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".kickid <id> [reason]" CLRCODE_RST " kick by account id"));
 			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".ban [nick] [time] [reason]" CLRCODE_RST " ban (30m/12h/7d/2w/perm)"));
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".banid <id> [time] [reason]" CLRCODE_RST " ban by account id"));
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".unbanid <id>" CLRCODE_RST " remove a ban by account id"));
 			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".op" CLRCODE_RST " op someone ig"));
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".opid <id>" CLRCODE_RST " grant operator rights by account id"));
 		}
 
 		break;

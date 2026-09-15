@@ -1,5 +1,6 @@
 #include <Log.h>
 #include <Server.h>
+#include <Admin.h>
 #include <States.h>
 #include <Config.h>
 #include <Colors.h>
@@ -166,10 +167,11 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		snprintf(msg, 100, "server " CLRCODE_RED "%d" CLRCODE_RST " of " CLRCODE_BLU "%d" CLRCODE_RST, v->server->id + 1, g_config.server_count);
 
 		server_send_msg(v->server, v->peer, "server for @pre-alpha >td2dr: friends of jimbo");
-		server_send_msg(v->server, v->peer, CLRCODE_RED "`reserve ~server if \\inf's ~server downed");
+		server_send_msg(v->server, v->peer, CLRCODE_RED "~hosted by \\inf");
 		server_send_msg(v->server, v->peer, "build from " CLRCODE_PUR __DATE__ " " CLRCODE_GRN __TIME__ CLRCODE_RST);
 		server_send_msg(v->server, v->peer, msg);
 		server_send_msg(v->server, v->peer, CLRCODE_GRA "report <bugs ~to /gaster_blaster ~in >telegram");
+		server_send_msg(v->server, v->peer, CLRCODE_GRA "~server >telegram ~bot: @td2dr_frieds_of_jimbo");
 		server_send_msg(v->server, v->peer, g_config.motd);
 
 		if (v->mod_tool)
@@ -186,6 +188,7 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		PacketRead(pid, packet, packet_read16, uint16_t);
 		PacketRead(msg, packet, packet_readstr, String);
 		AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+		admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 		// cheats
 		if (strstr(msg.value, "i want big burgr"))

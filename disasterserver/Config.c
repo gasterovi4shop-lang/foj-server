@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <ctype.h>
 #include <io/Dir.h>
 
 #ifdef SYS_ANDROID
@@ -41,6 +42,8 @@ SERVER_API Config g_config =
 cJSON*	g_bans = NULL;
 cJSON*	g_timeouts = NULL;
 cJSON*	g_ops = NULL;
+cJSON*	g_opids = NULL;
+cJSON*	g_custom_ids = NULL;
 Mutex	g_banMut;
 Mutex	g_timeoutMut;
 Mutex	g_opMut;
@@ -178,6 +181,8 @@ init_balls:
 	RAssert(collection_init(&g_timeouts,	TIMEOUTS_FILE,	"{}"));
 	RAssert(collection_init(&g_bans,		BANS_FILE,		"{}"));
 	RAssert(collection_init(&g_ops,		OPERATORS_FILE, "{ \"127.0.0.1\": \"Host (127.0.0.1)\" }"));
+	RAssert(collection_init(&g_opids,	OPERATOR_IDS_FILE, "{}"));
+	RAssert(collection_init(&g_custom_ids,	CUSTOM_IDS_FILE, "{}"));
 
 	if (!g_config.anticheat)
 	{
@@ -558,4 +563,116 @@ bool op_check(const char* ip, bool* result)
 	MutexUnlock(g_opMut);
 
 	return true;
+}
+
+bool op_id_add(const char* accid)
+{
+	bool res = false;
+
+	if (!accid || accid[0] == '\0')
+		return false;
+
+	MutexLock(g_opMut);
+	{
+		if (!cJSON_HasObjectItem(g_opids, accid))
+		{
+			cJSON_AddItemToObject(g_opids, accid, cJSON_CreateTrue());
+			res = collection_save(OPERATOR_IDS_FILE, g_opids);
+		}
+		else
+		{
+			res = true;
+		}
+	}
+	MutexUnlock(g_opMut);
+
+	return res;
+}
+
+bool op_id_check(const char* accid, bool* result)
+{
+	*result = false;
+
+	if (!accid || accid[0] == '\0')
+		return true;
+
+	MutexLock(g_opMut);
+	{
+		if (cJSON_HasObjectItem(g_opids, accid))
+			*result = true;
+	}
+	MutexUnlock(g_opMut);
+
+	return true;
+}
+
+bool custom_id_set(const char* accid, const char* custom_id)
+{
+	if (!accid || !accid[0] || !custom_id || strlen(custom_id) < 3 || strlen(custom_id) > 18)
+		return false;
+
+	char normalized[19];
+	for (size_t i = 0; custom_id[i]; i++)
+	{
+		unsigned char c = (unsigned char)custom_id[i];
+		if (!isalnum(c) && c != '_' && c != '-')
+			return false;
+		normalized[i] = (char)tolower(c);
+	}
+	normalized[strlen(custom_id)] = '\0';
+
+	MutexLock(g_opMut);
+	{
+		for (cJSON* item = g_custom_ids->child; item; item = item->next)
+		{
+			if (strcmp(item->string, accid) != 0 &&
+				strcmp(cJSON_GetStringValue(item), normalized) == 0)
+			{
+				MutexUnlock(g_opMut);
+				return false;
+			}
+		}
+
+		if (cJSON_HasObjectItem(g_custom_ids, accid))
+			cJSON_ReplaceItemInObject(g_custom_ids, accid, cJSON_CreateString(normalized));
+		else
+			cJSON_AddItemToObject(g_custom_ids, accid, cJSON_CreateString(normalized));
+	}
+	bool res = collection_save(CUSTOM_IDS_FILE, g_custom_ids);
+	MutexUnlock(g_opMut);
+	return res;
+}
+
+bool custom_id_get(const char* accid, char* out, size_t cap)
+{
+	if (!out || !cap)
+		return false;
+
+	MutexLock(g_opMut);
+	{
+		const char* value = cJSON_GetStringValue(cJSON_GetObjectItem(g_custom_ids, accid));
+		snprintf(out, cap, "%s", value && value[0] ? value : accid);
+	}
+	MutexUnlock(g_opMut);
+	return true;
+}
+
+bool custom_id_reset(const char* accid)
+{
+	if (!accid || !accid[0])
+		return false;
+
+	MutexLock(g_opMut);
+	{
+		if (!cJSON_HasObjectItem(g_custom_ids, accid))
+		{
+			MutexUnlock(g_opMut);
+			return true;
+		}
+
+		cJSON_DeleteItemFromObject(g_custom_ids, accid);
+	}
+	bool res = collection_save(CUSTOM_IDS_FILE, g_custom_ids);
+	MutexUnlock(g_opMut);
+	return res;
 }

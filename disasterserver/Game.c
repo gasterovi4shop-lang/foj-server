@@ -7,6 +7,7 @@
 #include <CMath.h>
 #include <DyList.h>
 #include <Server.h>
+#include <Admin.h>
 #include <Palette.h>
 #include <Colors.h>
 #include <maps/JokerPalace.h>
@@ -1370,6 +1371,7 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 		PacketRead(pid, packet, packet_read16, uint16_t);
 		PacketRead(msg, packet, packet_readstr, String);
 		AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+		admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 		Info("%s " LOG_RST "(id %d): %s", v->nickname.value, v->id, msg.value);
 		if (!server_cmd_handle(v->server, server_cmd_parse(&msg), v, &msg))

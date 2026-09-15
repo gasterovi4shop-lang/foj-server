@@ -29,6 +29,11 @@ void console_help_text(char* out, size_t cap)
 		".kick <nick> [reason] - kick a player\n"
 		".banid <id> [time] [reason] - ban by account id (works offline)\n"
 		".unbanid <id> - remove a ban by account id\n"
+		".kickid <id> [reason] - kick by account id\n"
+		".opid <id> - grant operator rights by account id\n"
+		".myid - show your system account id\n"
+		".set_id <id> - set your custom id (3-18 letters, digits, _ or -)\n"
+		".reset_id [system_id] - reset your custom id; operators may specify another id\n"
 		".news <text> - send a newsletter notification\n"
 		".list - online players\n"
 		".map <1-%d> - force a map (starts char select)\n"
@@ -226,6 +231,39 @@ static bool console_exec(Server* server, char* line)
 		return true;
 	}
 
+	if (strcmp(cmd, ".kickid") == 0)
+	{
+		char* id = strtok(NULL, " ");
+		char* reason = id ? strtok(NULL, "") : NULL;
+
+		if (!id)
+		{
+			out("usage: .kickid <id> [reason]");
+			return true;
+		}
+
+		char confirm[256];
+		server_host_kick_id(id, reason ? reason : "", confirm, sizeof(confirm));
+		out("%s", confirm);
+		return true;
+	}
+
+	if (strcmp(cmd, ".opid") == 0)
+	{
+		char* id = strtok(NULL, " ");
+
+		if (!id)
+		{
+			out("usage: .opid <id>");
+			return true;
+		}
+
+		char confirm[256];
+		server_host_op_id(id, confirm, sizeof(confirm));
+		out("%s", confirm);
+		return true;
+	}
+
 	if (strcmp(cmd, ".map") == 0)
 	{
 		char* arg = strtok(NULL, " ");
@@ -311,7 +349,7 @@ static bool console_exec(Server* server, char* line)
 
 	if (strcmp(cmd, ".help") == 0 || strcmp(cmd, "help") == 0)
 	{
-		char buf[512];
+		char buf[1024];
 		console_help_text(buf, sizeof(buf));
 
 		// печатаем построчно (в буфере разбиение на строки тоже сохранится)

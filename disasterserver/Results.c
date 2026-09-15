@@ -1,6 +1,7 @@
 #include <Player.h>
 #include <Packet.h>
 #include <Server.h>
+#include <Admin.h>
 #include <Colors.h>
 #include <States.h>
 
@@ -228,6 +229,7 @@ bool results_state_handle(PeerData* v, Packet* packet)
 			PacketRead(pid, packet, packet_read16, uint16_t);
 			PacketRead(msg, packet, packet_readstr, String);
 			AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+			admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 			v->timeout = 0;
 

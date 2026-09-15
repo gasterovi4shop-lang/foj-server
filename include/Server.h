@@ -34,6 +34,7 @@ typedef struct PeerData
 	String nickname;
 	String udid;
 	char accid[12]; // server-side short account id (salted hash of udid)
+	char custom_id[19]; // player-selected result-screen ID
 	uint8_t lobby_icon;
 	int8_t pet;
 
@@ -210,6 +211,10 @@ bool server_host_kick(Server* server, const char* nick, const char* reason, char
 // that already left; if the player is online they get dropped instantly
 bool server_host_ban_udid(const char* udid, const char* dur, const char* reason, char* confirm, size_t cap);
 bool server_host_unban(const char* key, char* confirm, size_t cap);
+
+// kick / op by account id (accid or udid): search across all lobbies
+bool server_host_kick_id(const char* id, const char* reason, char* confirm, size_t cap);
+bool server_host_op_id(const char* id, char* confirm, size_t cap);
 
 bool server_worker(Server *server);
 bool server_broadcast(Server *server, Packet *packet, bool reliable);
