@@ -191,6 +191,9 @@ static cJSON* handle_players(int srv_index)
 			cJSON_AddNumberToObject(item, "id", peer->id);
 			cJSON_AddStringToObject(item, "nick", peer->nickname.value);
 			cJSON_AddStringToObject(item, "accid", peer->accid);
+			cJSON_AddStringToObject(item, "custom_id",
+				peer->custom_id[0] && strcmp(peer->custom_id, peer->accid) != 0
+					? peer->custom_id : "");
 			cJSON_AddStringToObject(item, "udid", peer->udid.value);
 			cJSON_AddStringToObject(item, "ip", peer->ip.value);
 			cJSON_AddBoolToObject(item, "in_game", peer->in_game);
@@ -438,6 +441,92 @@ static cJSON* handle_profile(const cJSON* req)
 		cJSON_AddNumberToObject(resp, "seconds", seconds);
 	}
 
+	return resp;
+}
+
+static cJSON* handle_custom_id(const cJSON* req)
+{
+	cJSON* resp = cJSON_CreateObject();
+	const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "action"));
+	const char* raw_id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "id"));
+	if (!action || !raw_id || !raw_id[0])
+	{
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "missing action or id");
+		return resp;
+	}
+
+	char accid[16];
+	snprintf(accid, sizeof(accid), "%s", raw_id);
+	for (char* p = accid; *p; p++)
+		*p = (char)tolower((unsigned char)*p);
+
+	if (strcmp(action, "get") == 0)
+	{
+		char value[19];
+		if (!custom_id_get(accid, value, sizeof(value)))
+		{
+			cJSON_AddBoolToObject(resp, "ok", false);
+			cJSON_AddStringToObject(resp, "error", "failed to read custom id");
+			return resp;
+		}
+		cJSON_AddBoolToObject(resp, "ok", true);
+		cJSON_AddStringToObject(resp, "system_id", accid);
+		cJSON_AddStringToObject(resp, "custom_id",
+			strcmp(value, accid) == 0 ? "" : value);
+		return resp;
+	}
+
+	if (strcmp(action, "reset") == 0)
+	{
+		bool had_custom = false;
+		char current[19];
+		if (custom_id_get(accid, current, sizeof(current)))
+			had_custom = strcmp(current, accid) != 0;
+		bool ok = custom_id_reset(accid);
+		cJSON_AddBoolToObject(resp, "ok", ok);
+		cJSON_AddBoolToObject(resp, "had_custom", had_custom);
+		if (!ok)
+			cJSON_AddStringToObject(resp, "error", "failed to reset custom id");
+		return resp;
+	}
+
+	if (strcmp(action, "set") == 0)
+	{
+		const char* value = cJSON_GetStringValue(
+			cJSON_GetObjectItemCaseSensitive(req, "custom_id"));
+		if (!value || !custom_id_set(accid, value))
+		{
+			cJSON_AddBoolToObject(resp, "ok", false);
+			cJSON_AddStringToObject(resp, "error", "invalid or occupied custom id");
+			return resp;
+		}
+
+		for (int i = 0; i < disaster_count(); i++)
+		{
+			Server* server = disaster_get(i);
+			if (!server)
+				continue;
+			MutexLock(server->state_lock);
+			for (size_t p = 0; p < server->peers.capacity; p++)
+			{
+				PeerData* peer = (PeerData*)server->peers.ptr[p];
+				if (peer && strcmp(peer->accid, accid) == 0)
+					custom_id_get(accid, peer->custom_id, sizeof(peer->custom_id));
+			}
+			MutexUnlock(server->state_lock);
+		}
+
+		char normalized[19];
+		custom_id_get(accid, normalized, sizeof(normalized));
+		cJSON_AddBoolToObject(resp, "ok", true);
+		cJSON_AddStringToObject(resp, "system_id", accid);
+		cJSON_AddStringToObject(resp, "custom_id", normalized);
+		return resp;
+	}
+
+	cJSON_AddBoolToObject(resp, "ok", false);
+	cJSON_AddStringToObject(resp, "error", "unknown custom id action");
 	return resp;
 }
 
@@ -919,6 +1008,8 @@ static void admin_client_thread(void* arg)
 				resp = handle_profile(req);
 			else if (cmd && strcmp(cmd, "known") == 0)
 				resp = handle_known(req);
+			else if (cmd && strcmp(cmd, "custom_id") == 0)
+				resp = handle_custom_id(req);
 			else if (cmd && strcmp(cmd, "opadd") == 0)
 				resp = handle_opadd(req);
 			else if (cmd && strcmp(cmd, "opdel") == 0)
