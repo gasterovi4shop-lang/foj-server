@@ -14,6 +14,7 @@
 	#define OPERATORS_FILE "Operators.json"
 	#define OPERATOR_IDS_FILE "OperatorIds.json"
 	#define CUSTOM_IDS_FILE "CustomIds.json"
+	#define WHITELIST_FILE "Whitelist.json"
 	#define TIMEOUTS_FILE "Timeouts.json"
 	#define NEWS_FILE "News.json"
 #else
@@ -23,6 +24,7 @@
 	#define OPERATORS_FILE ANDROID_DIR "Operators.json"
 	#define OPERATOR_IDS_FILE ANDROID_DIR "OperatorIds.json"
 	#define CUSTOM_IDS_FILE ANDROID_DIR "CustomIds.json"
+	#define WHITELIST_FILE ANDROID_DIR "Whitelist.json"
 	#define TIMEOUTS_FILE ANDROID_DIR "Timeouts.json"
 	#define NEWS_FILE ANDROID_DIR "News.json"
 #endif
@@ -39,6 +41,7 @@ typedef struct
 	bool	log_file;
 	bool	anticheat;
 	bool	pride;
+	bool	demonize; // могут ли выжившие демонизироваться после смерти
 	bool 	map_list[21];
 	Mutex	map_list_lock;
 
@@ -51,6 +54,7 @@ SERVER_API extern cJSON* g_timeouts;
 SERVER_API extern cJSON* g_ops;
 SERVER_API extern cJSON* g_opids;
 SERVER_API extern cJSON* g_custom_ids;
+SERVER_API extern cJSON* g_whitelist;
 SERVER_API extern Mutex	g_banMut;
 SERVER_API extern Mutex	g_timeoutMut;
 SERVER_API extern Mutex	g_opMut;
@@ -81,9 +85,17 @@ SERVER_API bool	op_revoke(const char* ip);
 SERVER_API bool	op_check(const char* ip, bool* result);
 SERVER_API bool	op_id_add(const char* accid);
 SERVER_API bool	op_id_check(const char* accid, bool* result);
+SERVER_API bool	op_id_revoke(const char* accid);
 SERVER_API bool	custom_id_set(const char* accid, const char* custom_id);
 SERVER_API bool	custom_id_get(const char* accid, char* out, size_t cap);
 SERVER_API bool	custom_id_reset(const char* accid);
+
+// whitelist mode: when enabled, only listed account ids can join
+SERVER_API bool	wl_enabled(void);
+SERVER_API bool	wl_set_enabled(bool on);
+SERVER_API bool	wl_add(const char* accid);
+SERVER_API bool	wl_remove(const char* accid);
+SERVER_API bool	wl_check(const char* accid);
 
 SERVER_API bool	collection_save(const char* file, cJSON* value);
 SERVER_API bool	collection_init(cJSON** output, const char* file, const char* default_value);

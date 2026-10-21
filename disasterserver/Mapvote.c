@@ -71,7 +71,8 @@ bool mapvote_state_handle(PeerData* v, Packet* packet)
 		{
 			PacketRead(pid, packet, packet_read16, uint16_t);
 			PacketRead(msg, packet, packet_readstr, String);
-			AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+			//слишком длинное сообщение обрезается до 40 символов вместо кика клиента
+			packet_truncate_chatmsg(packet, 40);
 			admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 			v->timeout = 0;

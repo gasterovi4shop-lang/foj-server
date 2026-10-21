@@ -5,6 +5,9 @@
 #include <Maps.h>
 #include <Player.h>
 
+#define LOBBY_NO_COUNTDOWN (5 + 1)
+#define LOBBY_COUNTDOWN (3)
+
 #define AssertOrDisconnect(server, x) if(!(x)) { server_disconnect(server, v->peer, DR_OTHER, "AssertOrDisconnect(" #x ") failed!"); return false; }
 #define ENTITY_BODY \
 char tag[16];\
@@ -29,6 +32,7 @@ typedef struct Entity
 #define CMD_BAN 1467681
 #define CMD_KICK 45773684
 #define CMD_OP 47759
+#define CMD_EXE 1471268
 #define CMD_YES 1489913
 #define CMD_Y 1547
 #define CMD_NO 47727
@@ -42,8 +46,11 @@ typedef struct Entity
 #define CMD_FORCEEXE 3221390709
 #define CMD_RETURN 1236067038
 #define CMD_MYID 45848821
+#define CMD_MAPDRAFT 791961744
+#define CMD_B 1524
 
 bool lobby_init				(Server* server);
+bool lobby_check_countdown	(Server* server);
 bool lobby_state_join		(PeerData* v);
 bool lobby_state_left		(PeerData* v);
 bool lobby_state_handle		(PeerData* v, Packet* packet);
@@ -55,6 +62,14 @@ bool mapvote_state_join		(PeerData * v);
 bool mapvote_state_left		(PeerData * v);
 bool mapvote_state_handle	(PeerData* v, Packet* packet);
 bool mapvote_state_tick		(Server* server);
+
+bool mapdraft_init			(Server* server);
+bool mapdraft_state_join	(PeerData* v);
+bool mapdraft_state_left	(PeerData* v);
+bool mapdraft_state_handle	(PeerData* v, Packet* packet);
+bool mapdraft_state_tick	(Server* server);
+// .b handler: bans a map during ST_MAPDRAFT; returns false outside the draft
+bool mapdraft_cmd_ban		(PeerData* v, String* msg);
 
 bool charselect_init			(int8_t map, Server* server);
 bool charselect_state_join		(PeerData* v);

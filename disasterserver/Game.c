@@ -9,6 +9,7 @@
 #include <Server.h>
 #include <Admin.h>
 #include <Palette.h>
+#include <Config.h>
 #include <Colors.h>
 #include <maps/JokerPalace.h>
 #include <entities/Ring.h>
@@ -444,7 +445,8 @@ bool game_demonize(Server* server, PeerData* data)
 		players++;
 	}
 
-	if (players / 2 > demonized)
+	// демонизация отключена - труп окончательно погибает
+	if (players / 2 > demonized && g_config.demonize)
 	{
 		DEL_FLAG(data->plr.flags, PLAYER_DEAD);
 		SET_FLAG(data->plr.flags, PLAYER_DEMONIZED);
@@ -649,6 +651,105 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 			RAssert(jp_sync(v->server, v));
 			break;
 		}
+
+		// confirm the authoritative player list so the spectator's roster
+		// is correct immediately instead of waiting for ping staleness
+		for (size_t i = 0; i < v->server->peers.capacity; i++)
+		{
+			PeerData* p = (PeerData*)v->server->peers.ptr[i];
+			if (!p)
+				continue;
+
+			Packet pack;
+			PacketCreate(&pack, SERVER_WAITING_PLAYER_INFO);
+			PacketWrite(&pack, packet_write8, p->in_game);
+			PacketWrite(&pack, packet_write16, p->id);
+			PacketWrite(&pack, packet_writestr, p->nickname);
+
+			if (p->in_game)
+			{
+				PacketWrite(&pack, packet_write8, v->server->game.exe == p->id);
+				PacketWrite(&pack, packet_write8, v->server->game.exe == p->id ? p->exe_char : p->surv_char);
+			}
+			else
+			{
+				PacketWrite(&pack, packet_write8, p->lobby_icon);
+			}
+
+			RAssert(packet_send(v->peer, &pack, true));
+		}
+
+		// escaped players keep no puppet: tell the spectator so their roster
+		// shows the escaped icon instead of a phantom empty slot
+		for (size_t i = 0; i < v->server->peers.capacity; i++)
+		{
+			PeerData* p = (PeerData*)v->server->peers.ptr[i];
+			if (!p || !p->in_game)
+				continue;
+
+			if (!(p->plr.flags & PLAYER_ESCAPED))
+				continue;
+
+			Packet pack;
+			PacketCreate(&pack, SERVER_GAME_PLAYER_ESCAPED);
+			PacketWrite(&pack, packet_write16, p->id);
+			RAssert(packet_send(v->peer, &pack, true));
+		}
+
+		// palettes: players send them before a spectator joins, so the stored
+		// packets are resent here - otherwise puppets spawn with default colors
+		for (size_t pi = 0; pi < v->server->peers.capacity; pi++)
+		{
+			PeerData* p = (PeerData*)v->server->peers.ptr[pi];
+			if (!p || !p->in_game)
+				continue;
+
+			Packet pack;
+
+			if (p->palette_len > 0)
+			{
+				memcpy(pack.buff, p->palette_buf, p->palette_len);
+				pack.len = p->palette_len;
+				pack.pos = 0;
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+
+			if (p->pet_palette_len > 0)
+			{
+				memcpy(pack.buff, p->pet_palette_buf, p->pet_palette_len);
+				pack.len = p->pet_palette_len;
+				pack.pos = 0;
+				RAssert(packet_send(v->peer, &pack, true));
+			}
+		}
+
+		// pet ids so the spectator spawns the right pets
+		{
+			uint8_t petcount = 0;
+
+			for (size_t pi = 0; pi < v->server->peers.capacity; pi++)
+			{
+				PeerData* p = (PeerData*)v->server->peers.ptr[pi];
+				if (p && p->in_game)
+					petcount++;
+			}
+
+			Packet pack;
+			PacketCreate(&pack, SERVER_SPECTATE_PETS);
+			PacketWrite(&pack, packet_write8, petcount);
+
+			for (size_t pi = 0; pi < v->server->peers.capacity; pi++)
+			{
+				PeerData* p = (PeerData*)v->server->peers.ptr[pi];
+				if (!p || !p->in_game)
+					continue;
+
+				PacketWrite(&pack, packet_write16, p->id);
+				PacketWrite(&pack, packet_write8, (uint8_t)p->pet);
+			}
+
+			RAssert(packet_send(v->peer, &pack, true));
+		}
 		break;
 	}
 
@@ -676,6 +777,14 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 	case CLIENT_RING_BROKE:
 	{
 		AssertOrDisconnect(v->server, v->in_game);
+
+		// store the pet palette so spectators joining later receive it
+		if (packet->buff[1] == CLIENT_PET_PALETTE)
+		{
+			v->pet_palette_len = packet->len > 256 ? 256 : packet->len;
+			memcpy(v->pet_palette_buf, packet->buff, v->pet_palette_len);
+		}
+
 		server_broadcast_ex(v->server, packet, true, v->id);
 		break;
 	}
@@ -684,6 +793,11 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 	{
 		AssertOrDisconnect(v->server, v->in_game);
 		AssertOrDisconnect(v->server, !g_config.anticheat || palette_player_validate(v, packet));
+
+		// store so spectators joining later can be sent the palette
+		v->palette_len = packet->len > 256 ? 256 : packet->len;
+		memcpy(v->palette_buf, packet->buff, v->palette_len);
+
 		server_broadcast_ex(v->server, packet, true, v->id);
 		break;
 	}
@@ -1235,7 +1349,7 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 				break;
 
 			SET_FLAG(v->plr.flags, PLAYER_DEAD);
-			if (v->plr.flags & PLAYER_REVIVED || v->server->game.time_sec < TICKSPERSEC * 2)
+			if (g_config.demonize && (v->plr.flags & PLAYER_REVIVED || v->server->game.time_sec < TICKSPERSEC * 2))
 			{
 				RAssert(game_demonize(v->server, v));
 			}
@@ -1370,7 +1484,8 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 
 		PacketRead(pid, packet, packet_read16, uint16_t);
 		PacketRead(msg, packet, packet_readstr, String);
-		AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+		//слишком длинное сообщение обрезается до 40 символов вместо кика клиента
+		packet_truncate_chatmsg(packet, 40);
 		admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 		Info("%s " LOG_RST "(id %d): %s", v->nickname.value, v->id, msg.value);
@@ -1865,7 +1980,7 @@ bool game_player_tick(Server* server)
 				}
 			}
 
-			if (server->game.time_sec < TICKSPERSEC * 2)
+			if (g_config.demonize && server->game.time_sec < TICKSPERSEC * 2)
 			{
 				game_demonize(server, data);
 				continue;

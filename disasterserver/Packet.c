@@ -23,6 +23,31 @@ String string_new(const char* value)
 	return str;
 }
 
+// обрезает chat-сообщение в пакете до maxchars символов UTF-8, не разрывая
+// multibyte-последовательности; заголовок чат-пакета: passthrough u8 + type u8
+// + pid u16 = 4 байта, сообщение идёт следом и завершается нулём.
+// Используется вместо кика клиента при превышении лимита сообщения.
+void packet_truncate_chatmsg(Packet* packet, size_t maxchars)
+{
+	size_t chars = 0;
+	size_t end = 4;
+
+	while (end < packet->len && packet->buff[end] != '\0')
+	{
+		if ((packet->buff[end] & 0xc0) != 0x80)
+		{
+			if (chars == maxchars)
+				break;
+			chars++;
+		}
+
+		end++;
+	}
+
+	packet->buff[end] = '\0';
+	packet->len = (uint8_t)(end + 1);
+}
+
 size_t string_length(String* str)
 {
 	size_t len = 0;

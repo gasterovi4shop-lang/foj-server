@@ -10,8 +10,8 @@
 #define JP_GAMBLE_RING_COST 3
 #define JP_GAMBLE_SHARD_COST 1
 #define JP_GAMBLE_UNLOCK_TIME (2 * TICKSPERSEC - 30)
-#define JP_GAMBLE_SAFE_ROLLS 6
-#define JP_GAMBLE_GUARANTEE_ROLL 11
+#define JP_GAMBLE_SAFE_ROLLS 5
+#define JP_GAMBLE_GUARANTEE_ROLL 10
 #define JP_SHARD_COUNT 64
 
 enum
@@ -85,6 +85,51 @@ static JPShard* jp_find_shard(Server* server, uint16_t eid)
 	return NULL;
 }
 
+static bool jp_dropshards(Server* server, PeerData* v)
+{
+	for (uintptr_t i = 0; i < v->plr.data[0]; i++)
+	{
+		JPShard shard = MakeJPShard(JP_SHARD_LOOSE_RID);
+		shard.dropped = true;
+		shard.pid = v->id;
+		shard.gen = (uint16_t)v->plr.data[1];
+		shard.pos.x = v->plr.pos.x + (-12 + rand() % 25);
+		shard.pos.y = v->plr.pos.y + (-8 + rand() % 17);
+		RAssert(game_spawn(server, (Entity*)&shard, sizeof(JPShard), NULL));
+	}
+
+	v->plr.data[0] = 0;
+	v->plr.data[1]++;
+	return true;
+}
+
+static bool jp_move_dropped(Server* server, PeerData* v, uint16_t x, uint16_t y)
+{
+	for (size_t i = 0; i < server->game.entities.capacity; i++)
+	{
+		Entity* entity = (Entity*)server->game.entities.ptr[i];
+		if (!entity || strcmp(entity->tag, "jpshard") != 0)
+			continue;
+
+		JPShard* shard = (JPShard*)entity;
+		if (!shard->dropped || shard->pid != v->id || shard->gen != (uint16_t)v->plr.data[1])
+			continue;
+
+		shard->pos.x = x + (-12 + rand() % 25);
+		shard->pos.y = y + (-8 + rand() % 17);
+
+		Packet pack;
+		PacketCreate(&pack, SERVER_JPSHARD_STATE);
+		PacketWrite(&pack, packet_write8, 2);
+		PacketWrite(&pack, packet_write16, shard->id);
+		PacketWrite(&pack, packet_write16, (uint16_t)shard->pos.x);
+		PacketWrite(&pack, packet_write16, (uint16_t)shard->pos.y);
+		server_broadcast(v->server, &pack, true);
+	}
+
+	return true;
+}
+
 static bool jp_open(Server* server)
 {
 	if (server->game.jp_gamble_opened)
@@ -110,7 +155,8 @@ static bool jp_open(Server* server)
 
 bool jp_init(Server* server)
 {
-	RAssert(map_time(server, (2 * TICKSPERSEC) + 25, 25)); //145
+	//стартовое время 2:00, бонус +10 секунд за каждого выжившего
+	RAssert(map_time(server, 2 * TICKSPERSEC, 10));
 	RAssert(map_ring(server, 5));
 	RAssert(game_spawn(server, (Entity*)&(MakeSpike()), sizeof(SpikeController), NULL));
 	server->game.jp_gamble_failed_rolls = 0;
@@ -132,13 +178,13 @@ bool jp_init(Server* server)
 
 bool jp_tick(Server* server)
 {
-	if (server->game.time_sec <= TICKSPERSEC - 30 && server->game.bring_state < BS_ACTIVATED)
-	{
-		if (server->game.bring_state < BS_DEACTIVATED)
-			RAssert(game_bigring(server, BS_DEACTIVATED));
+	//зелёное кольцо появляется в 1:00 по таймеру (закрытое, неактивное)
+	if (server->game.time_sec <= TICKSPERSEC && server->game.bring_state < BS_DEACTIVATED)
+		RAssert(game_bigring(server, BS_DEACTIVATED));
 
+	//кольцо открывается в 0:50
+	if (server->game.time_sec <= TICKSPERSEC - 10 && server->game.bring_state < BS_ACTIVATED)
 		RAssert(game_bigring(server, BS_ACTIVATED));
-	}
 
 	return true;
 }
@@ -255,6 +301,51 @@ bool jp_tcpmsg(PeerData* v, Packet* packet)
 			free(ent);
 			break;
 		}
+
+		case CLIENT_PLAYER_DEATH_STATE:
+		{
+			AssertOrDisconnect(v->server, v->in_game);
+			AssertOrDisconnect(v->server, v->id != v->server->game.exe);
+
+			if (v->server->game.end > 0)
+				break;
+
+			PacketRead(dead, packet, packet_read8, uint8_t);
+			PacketRead(rtimes, packet, packet_read8, uint8_t);
+
+			// the common handler broadcast the death and reset the client-side
+			// counters; drop the carried shards on the ground here. data[0] is
+			// already zeroed after the first drop, so a duplicated death
+			// packet cannot drop the shards twice
+			Info("[JP] death state: id %d, dead %d, carried shards %d", v->id, dead, (int)v->plr.data[0]);
+
+			if (dead && v->plr.data[0] > 0)
+			{
+				Info("[JP] dropping %d shards from id %d", (int)v->plr.data[0], v->id);
+				RAssert(jp_dropshards(v->server, v));
+			}
+			break;
+		}
+
+		case CLIENT_JPSHARD_BODYTP:
+		{
+			AssertOrDisconnect(v->server, v->in_game);
+			AssertOrDisconnect(v->server, v->id != v->server->game.exe);
+
+			if (v->server->game.end > 0)
+				break;
+
+			if (!(v->plr.flags & PLAYER_DEAD))
+				break;
+
+			PacketRead(x, packet, packet_read16, uint16_t);
+			PacketRead(y, packet, packet_read16, uint16_t);
+
+			// the dead body was teleported by a deathtp pad: move the shards
+			// from this player's latest drop to the pad's destination
+			RAssert(jp_move_dropped(v->server, v, x, y));
+			break;
+		}
 	}
 
 	return true;
@@ -276,9 +367,19 @@ bool jp_sync(Server* server, PeerData* v)
 			JPShard* shard = (JPShard*)ent;
 
 			PacketCreate(&pack, SERVER_JPSHARD_STATE);
-			PacketWrite(&pack, packet_write8, 0);
-			PacketWrite(&pack, packet_write8, shard->rid);
-			PacketWrite(&pack, packet_write16, shard->id);
+			if (shard->dropped)
+			{
+				PacketWrite(&pack, packet_write8, 2);
+				PacketWrite(&pack, packet_write16, shard->id);
+				PacketWrite(&pack, packet_write16, (uint16_t)shard->pos.x);
+				PacketWrite(&pack, packet_write16, (uint16_t)shard->pos.y);
+			}
+			else
+			{
+				PacketWrite(&pack, packet_write8, 0);
+				PacketWrite(&pack, packet_write8, shard->rid);
+				PacketWrite(&pack, packet_write16, shard->id);
+			}
 			RAssert(packet_send(v->peer, &pack, true));
 		}
 		else if (strcmp(ent->tag, "jpdoor") == 0)

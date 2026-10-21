@@ -8,15 +8,13 @@
 #include <stdbool.h>
 #include <time.h>
 
-#define NO_COUNTDOWN (5 + 1)
-#define COUNTDOWN (3)
 
 bool lobby_send_countdown(Server* server)
 {
 	Packet pack;
 
 	PacketCreate(&pack, SERVER_LOBBY_COUNTDOWN);
-	PacketWrite(&pack, packet_write8, server->lobby.countdown_sec < NO_COUNTDOWN);
+	PacketWrite(&pack, packet_write8, server->lobby.countdown_sec < LOBBY_NO_COUNTDOWN);
 	PacketWrite(&pack, packet_write8, server->lobby.countdown_sec);
 
 	server_broadcast(server, &pack, true);
@@ -49,6 +47,17 @@ void lobby_check_vote(Server* server)
 			server->lobby.prac_countdown = 2 * TICKSPERSEC;
 			break;
 		}
+
+		case VOTE_MAPDRAFT:
+		{
+			char buffer[256];
+			snprintf(buffer, 256, "vote map draft " CLRCODE_GRN "succeeded~ (" CLRCODE_GRN "%d" " ~from " CLRCODE_RED "%d~)", server->lobby.vote.votecnt, server->lobby.vote.votetotal);
+			server_broadcast_msg(server, buffer);
+
+			server->lobby.mapdraft = true;
+			server_broadcast_msg(server, "the next match picks the map by " CLRCODE_GRN "map draft" CLRCODE_RST " - ban maps with .b");
+			break;
+		}
 		}
 	}
 	else
@@ -67,6 +76,14 @@ void lobby_check_vote(Server* server)
 		{
 			char buffer[256];
 			snprintf(buffer, 256, "vote practice " CLRCODE_RED "failed~ (" CLRCODE_GRN "%d" " ~from " CLRCODE_RED "%d~)", server->lobby.vote.votecnt, server->lobby.vote.votetotal);
+			server_broadcast_msg(server, buffer);
+			break;
+		}
+
+		case VOTE_MAPDRAFT:
+		{
+			char buffer[256];
+			snprintf(buffer, 256, "vote map draft " CLRCODE_RED "failed~ (" CLRCODE_GRN "%d" " ~from " CLRCODE_RED "%d~)", server->lobby.vote.votecnt, server->lobby.vote.votetotal);
 			server_broadcast_msg(server, buffer);
 			break;
 		}
@@ -95,13 +112,13 @@ bool lobby_check_countdown(Server* server)
 	if (count == server->peers.noitems && server->peers.noitems > 1)
 	{
 		server->lobby.countdown = TICKSPERSEC;
-		server->lobby.countdown_sec = COUNTDOWN;
+		server->lobby.countdown_sec = LOBBY_COUNTDOWN;
 		RAssert(lobby_send_countdown(server));
 	}
-	else if (server->lobby.countdown_sec != NO_COUNTDOWN)
+	else if (server->lobby.countdown_sec != LOBBY_NO_COUNTDOWN)
 	{
 		server->lobby.countdown = TICKSPERSEC;
-		server->lobby.countdown_sec = NO_COUNTDOWN;
+		server->lobby.countdown_sec = LOBBY_NO_COUNTDOWN;
 		RAssert(lobby_send_countdown(server));
 	}
 
@@ -119,6 +136,8 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		break;
 	case ST_MAPVOTE:
 		return mapvote_state_handle(v, packet);
+	case ST_MAPDRAFT:
+		return mapdraft_state_handle(v, packet);
 	case ST_CHARSELECT:
 		return charselect_state_handle(v, packet);
 	}
@@ -167,7 +186,7 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		snprintf(msg, 100, "server " CLRCODE_RED "%d" CLRCODE_RST " of " CLRCODE_BLU "%d" CLRCODE_RST, v->server->id + 1, g_config.server_count);
 
 		server_send_msg(v->server, v->peer, "server for @pre-alpha >td2dr: friends of jimbo");
-		server_send_msg(v->server, v->peer, CLRCODE_RED "~hosted by \\inf");
+		server_send_msg(v->server, v->peer, CLRCODE_RED "~hosted by &gasterovi4");
 		server_send_msg(v->server, v->peer, "build from " CLRCODE_PUR __DATE__ " " CLRCODE_GRN __TIME__ CLRCODE_RST);
 		server_send_msg(v->server, v->peer, msg);
 		server_send_msg(v->server, v->peer, CLRCODE_GRA "report <bugs ~to /gaster_blaster ~in >telegram");
@@ -187,7 +206,8 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 
 		PacketRead(pid, packet, packet_read16, uint16_t);
 		PacketRead(msg, packet, packet_readstr, String);
-		AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+		//слишком длинное сообщение обрезается до 40 символов вместо кика клиента
+		packet_truncate_chatmsg(packet, 40);
 		admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 		// cheats
@@ -288,6 +308,59 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 				break;
 			}
 			}
+			break;
+		}
+
+		/* Map Draft vote (ops enable it right away) */
+		case CMD_MAPDRAFT:
+		{
+			if (v->server->lobby.mapdraft)
+			{
+				server_send_msg(v->server, v->peer, CLRCODE_RED "map draft is already enabled.");
+				break;
+			}
+
+			if (v->op)
+			{
+				v->server->lobby.mapdraft = true;
+
+				char buffer[320];
+				snprintf(buffer, 320, "%s " CLRCODE_GRN "enabled map draft" CLRCODE_RST " for the next match", v->nickname.value);
+				server_broadcast_msg(v->server, buffer);
+				break;
+			}
+
+			if (v->server->lobby.vote.ongoing)
+			{
+				server_send_msg(v->server, v->peer, CLRCODE_RED "другая казнь уже в процессе.");
+				break;
+			}
+
+			if (v->vote_cooldown > 0)
+			{
+				char buffer[128];
+				snprintf(buffer, 128, CLRCODE_RED "ты не можешь начать опрос долбаебов в течении %dс", (int)(v->vote_cooldown / TICKSPERSEC));
+				server_send_msg(v->server, v->peer, buffer);
+				break;
+			}
+
+			if (!vote_init(v->server, &v->server->lobby.vote, VOTE_MAPDRAFT, 0))
+			{
+				server_send_msg(v->server, v->peer, CLRCODE_RED "маловато будет.");
+				break;
+			}
+
+			char buffer[356];
+			snprintf(buffer, 356, "%s " CLRCODE_GRN "предлагает map draft." CLRCODE_RST, v->nickname.value);
+
+			server_broadcast_msg(v->server, "-----------------------");
+			server_broadcast_msg(v->server, buffer);
+			server_broadcast_msg(v->server, "напиши " CLRCODE_GRN ".yes~ или скипай");
+			server_broadcast_msg(v->server, "результаты будут объявлены через " CLRCODE_GRA "20~ сек");
+			server_broadcast_msg(v->server, "-----------------------");
+
+			vote_add(&v->server->lobby.vote, v->id);
+			v->vote_cooldown = 30 * TICKSPERSEC;
 			break;
 		}
 
@@ -558,6 +631,9 @@ bool lobby_state_tick(Server* server)
 	case ST_MAPVOTE:
 		return mapvote_state_tick(server);
 
+	case ST_MAPDRAFT:
+		return mapdraft_state_tick(server);
+
 	case ST_CHARSELECT:
 		return charselect_state_tick(server);
 
@@ -579,14 +655,24 @@ bool lobby_state_tick(Server* server)
 		lobby_check_vote(server);
 
 	// Do countdown every second
-	if (server->lobby.countdown_sec <= COUNTDOWN)
+	if (server->lobby.countdown_sec <= LOBBY_COUNTDOWN)
 	{
 		if (server->lobby.countdown <= 0)
 		{
 			server->lobby.countdown += TICKSPERSEC;
 
 			if (--server->lobby.countdown_sec == 0)
+			{
+				// a freshly voted draft reruns the ban phase instead
+				if (server->lobby.mapdraft)
+					return mapdraft_init(server) || lobby_init(server);
+
+				// a map picked by an earlier draft skips the 3 map vote
+				if (server->lobby.mapdraft_map >= 0)
+					return charselect_init(server->lobby.mapdraft_map, server) || lobby_init(server);
+
 				return mapvote_init(server) || lobby_init(server);
+			}
 
 			RAssert(lobby_send_countdown(server));
 		}
@@ -643,7 +729,7 @@ bool lobby_init(Server* server)
 
 	server->state = ST_LOBBY;
 	server->lobby.countdown = TICKSPERSEC;
-	server->lobby.countdown_sec = NO_COUNTDOWN;
+	server->lobby.countdown_sec = LOBBY_NO_COUNTDOWN;
 	server->lobby.prac_countdown = 0;
 	memset(&server->lobby.vote, 0, sizeof(Vote));
 
@@ -670,6 +756,8 @@ bool lobby_state_join(PeerData* v)
 		break;
 	case ST_MAPVOTE:
 		return mapvote_state_join(v);
+	case ST_MAPDRAFT:
+		return mapdraft_state_join(v);
 	case ST_CHARSELECT:
 		return charselect_state_join(v);
 	}
@@ -691,6 +779,8 @@ bool lobby_state_left(PeerData* v)
 		break;
 	case ST_MAPVOTE:
 		return mapvote_state_left(v);
+	case ST_MAPDRAFT:
+		return mapdraft_state_left(v);
 	case ST_CHARSELECT:
 		return charselect_state_left(v);
 	}

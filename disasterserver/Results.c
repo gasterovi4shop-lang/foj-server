@@ -2,6 +2,7 @@
 #include <Packet.h>
 #include <Server.h>
 #include <Admin.h>
+#include <Config.h>
 #include <Colors.h>
 #include <States.h>
 
@@ -28,6 +29,125 @@ const char* SHAMES_2[] =
 	CLRCODE_RED "(сигма про 1488)"
 };
 #define SHAMES2_CNT 3
+
+// MVP: exe takes it by taking the round; once at least one survivor escapes
+// the exe lost and the best survivor does - stuns/heals decide, the rest breaks ties
+#define MVP_STUN_WEIGHT 2
+#define MVP_HEAL_WEIGHT 1
+
+static int results_mvp_score(const PeerData* data)
+{
+	return (int)data->plr.stats.stuns * MVP_STUN_WEIGHT
+		+ (int)data->plr.stats.hp_restored * MVP_HEAL_WEIGHT;
+}
+
+// true if a deserves MVP more than b: stuns+heals score,
+// then stuns, heals, danger time, rings, damage dealt, survive time, less damage taken
+static bool results_mvp_better(const PeerData* a, const PeerData* b)
+{
+	int sa = results_mvp_score(a);
+	int sb = results_mvp_score(b);
+
+	if (sa != sb)
+		return sa > sb;
+
+	if (a->plr.stats.stuns != b->plr.stats.stuns)
+		return a->plr.stats.stuns > b->plr.stats.stuns;
+
+	if (a->plr.stats.hp_restored != b->plr.stats.hp_restored)
+		return a->plr.stats.hp_restored > b->plr.stats.hp_restored;
+
+	if (a->plr.stats.danger_time != b->plr.stats.danger_time)
+		return a->plr.stats.danger_time > b->plr.stats.danger_time;
+
+	if (a->plr.stats.rings != b->plr.stats.rings)
+		return a->plr.stats.rings > b->plr.stats.rings;
+
+	if (a->plr.stats.damage != b->plr.stats.damage)
+		return a->plr.stats.damage > b->plr.stats.damage;
+
+	if (a->plr.stats.survive_time != b->plr.stats.survive_time)
+		return a->plr.stats.survive_time > b->plr.stats.survive_time;
+
+	return a->plr.stats.damage_taken < b->plr.stats.damage_taken;
+}
+
+static void results_calculate_mvp(Server* server)
+{
+	server->results.mvp_id = -1;
+
+	// the exe loses the round once at least one survivor escapes
+	bool exe_lost = false;
+	for (size_t i = 0; i < server->peers.capacity; i++)
+	{
+		PeerData* data = (PeerData*)server->peers.ptr[i];
+		if (!data || !data->in_game)
+			continue;
+
+		if (data->plr.flags & PLAYER_ESCAPED)
+			exe_lost = true;
+	}
+
+	for (size_t i = 0; i < server->game.left.capacity; i++)
+	{
+		PeerData* data = (PeerData*)server->game.left.ptr[i];
+		if (!data || !data->in_game)
+			continue;
+
+		if (data->plr.flags & PLAYER_ESCAPED)
+			exe_lost = true;
+	}
+
+	if (!exe_lost)
+	{
+		// nobody got away (exe win or time over) - the exe is the MVP
+		for (size_t i = 0; i < server->peers.capacity; i++)
+		{
+			PeerData* data = (PeerData*)server->peers.ptr[i];
+			if (!data || !data->in_game || (data->plr.flags & PLAYER_LEFT))
+				continue;
+
+			if (data->id == (uint16_t)server->game.exe)
+			{
+				server->results.mvp_id = (int16_t)data->id;
+				return;
+			}
+		}
+	}
+
+	// exe lost (or is gone): MVP goes to the best player;
+	// when the exe lost, his team (exe and demonized) is out
+	PeerData* best = NULL;
+
+	for (size_t i = 0; i < server->peers.capacity; i++)
+	{
+		PeerData* data = (PeerData*)server->peers.ptr[i];
+		if (!data || !data->in_game || (data->plr.flags & PLAYER_LEFT))
+			continue;
+
+		if (exe_lost && (data->id == (uint16_t)server->game.exe || (data->plr.flags & PLAYER_DEMONIZED)))
+			continue;
+
+		if (!best || results_mvp_better(data, best))
+			best = data;
+	}
+
+	for (size_t i = 0; i < server->game.left.capacity; i++)
+	{
+		PeerData* data = (PeerData*)server->game.left.ptr[i];
+		if (!data || !data->in_game || (data->plr.flags & PLAYER_LEFT))
+			continue;
+
+		if (exe_lost && (data->id == (uint16_t)server->game.exe || (data->plr.flags & PLAYER_DEMONIZED)))
+			continue;
+
+		if (!best || results_mvp_better(data, best))
+			best = data;
+	}
+
+	if (best)
+		server->results.mvp_id = (int16_t)best->id;
+}
 
 int compare(const PeerData** plr1, const PeerData** plr2)
 {
@@ -99,7 +219,14 @@ bool results_send(Server* server, PeerData* v, PeerData* data, bool has_quit)
 
 	nickname.len = snprintf(nickname.value, 129, "%s %s", data->nickname.value, postfix) + 1;
 
+	// short account id (or custom id) - the client draws it after the nick
+	String dispid;
+	char dispbuf[19];
+	custom_id_get(data->accid, dispbuf, sizeof(dispbuf));
+	dispid.len = snprintf(dispid.value, sizeof(dispid.value), "%s", dispbuf) + 1;
+
 	PacketWrite(&pack, packet_writestr, nickname);
+	PacketWrite(&pack, packet_writestr, dispid);
 	PacketWrite(&pack, packet_write8, 	data->exe_char != EX_NONE ? data->exe_char : data->surv_char);
 	PacketWrite(&pack, packet_write8,	server->game.ending);
 	PacketWrite(&pack, packet_write16,	server->game.time_sec)
@@ -115,6 +242,7 @@ bool results_send(Server* server, PeerData* v, PeerData* data, bool has_quit)
 	PacketWrite(&pack, packet_write16,		data->plr.stats.hp_restored);
 	PacketWrite(&pack, packet_writedouble,	data->plr.stats.survive_time);
 	PacketWrite(&pack, packet_writedouble,	data->plr.stats.danger_time);
+	PacketWrite(&pack, packet_write8,		data->id == (uint16_t)server->results.mvp_id);
 
 	return packet_send(v->peer, &pack, true);
 }
@@ -124,6 +252,8 @@ bool results_init(Server* server)
 	Debug("Attepting to enter ST_RESULTS...");
 	server->state = ST_RESULTS;
 	server->results.countdown = 15 * TICKSPERSEC;
+	results_calculate_mvp(server);
+	Info("Match MVP id is %d", server->results.mvp_id);
 
 	Packet pack;
 	PacketCreate(&pack, SERVER_RESULTS);
@@ -228,7 +358,8 @@ bool results_state_handle(PeerData* v, Packet* packet)
 
 			PacketRead(pid, packet, packet_read16, uint16_t);
 			PacketRead(msg, packet, packet_readstr, String);
-			AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+			//слишком длинное сообщение обрезается до 40 символов вместо кика клиента
+			packet_truncate_chatmsg(packet, 40);
 			admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 			v->timeout = 0;

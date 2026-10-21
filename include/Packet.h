@@ -30,6 +30,7 @@ typedef enum
 	SERVER_LOBBY_CHOOSEBAN,
 	SERVER_LOBBY_CHOOSEKICK,
 	SERVER_LOBBY_CHOOSEOP,
+	SERVER_LOBBY_CHOOSEEXE,
 	SERVER_LOBBY_CHANGELOBBY,
 	SERVER_CHAR_TIME_SYNC,
 
@@ -158,6 +159,7 @@ typedef enum
 	CLIENT_LOBBY_CHOOSEBAN,
 	CLIENT_LOBBY_CHOOSEKICK,
 	CLIENT_LOBBY_CHOOSEOP,
+	CLIENT_LOBBY_CHOOSEEXE,
 	CLIENT_PLAYER_PALETTE,
 	CLIENT_PET_PALETTE,
 
@@ -180,7 +182,20 @@ typedef enum
 	SERVER_SPECTATE_LIST,
 
 	// u8 enabled: a client enters/leaves spectator mode
-	CLIENT_SPECTATE_STATE
+	CLIENT_SPECTATE_STATE,
+
+	// u16 x, u16 y: the sender's dead body was teleported by a deathtp pad
+	// (Joker's Palace) — move the shards this player just dropped there
+	CLIENT_JPSHARD_BODYTP,
+
+	// u8 seconds: map draft pick timer sync (last 5s pulse on the client);
+	// appended at the end so older clients just ignore the unknown type
+	SERVER_DRAFT_TIME,
+
+	// u8 count, count x (u16 nid, s8 pet): pet ids of in-game players for
+	// spectators; sent on CLIENT_SPECTATE_SYNC, appended at the end so older
+	// clients just ignore the unknown type
+	SERVER_SPECTATE_PETS
 } PacketType;
 
 typedef struct
@@ -201,6 +216,9 @@ typedef struct
 
 String string_new(const char* value);
 size_t string_length(String* str);
+
+// обрезает chat-сообщение в пакете до maxchars символов UTF-8 вместо кика клиента
+void packet_truncate_chatmsg(Packet* packet, size_t maxchars);
 String string_lower(String str);
 #define __Str(x) string_new(x)
 

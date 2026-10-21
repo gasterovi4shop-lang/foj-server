@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define TICKSPERSEC 60
-#define BUILD_VERSION 1111
+#define BUILD_VERSION 1112
 
 #define STR_HELPER(x) #x
 #define STRINGIFY(x) STR_HELPER(x)
@@ -37,6 +37,13 @@ typedef struct PeerData
 	char custom_id[19]; // player-selected result-screen ID
 	uint8_t lobby_icon;
 	int8_t pet;
+
+	// last relayed palette packets, resent to spectators on spectate sync
+	// (players send palettes before a spectator joins, so they must be stored)
+	uint8_t palette_buf[256];
+	uint8_t palette_len;
+	uint8_t pet_palette_buf[256];
+	uint8_t pet_palette_len;
 
 	bool verified;
 	bool in_game;
@@ -98,10 +105,25 @@ typedef struct
 	uint8_t maps[3];
 	uint8_t votes[3];
 
+	/* Map Draft (see Mapdraft.c) */
+	bool	 mapdraft;          // draft armed for the next lobby -> match transition
+	int8_t	 mapdraft_map;      // map picked by the last draft, applied on the next match start (-1 = none)
+	uint8_t  draft_pool[21];    // remaining map indices (MAP_COUNT)
+	uint8_t  draft_pool_count;
+	uint16_t draft_order[16];   // ban turn order (peer ids, join order)
+	uint8_t  draft_order_count;
+	uint8_t  draft_turn;        // current index into draft_order
+	uint8_t  draft_timer_sec;   // seconds left for the current pick
+	double   draft_timer;       // per-second accumulator
+
 	/* Character Select */
 	int8_t map;
 	uint16_t exe;
 	bool avail[CH_JOKER + 1];
+
+	/* Forced exe (one-shot, .exe command) */
+	bool exe_forced;
+	uint16_t exe_forced_id;
 } Lobby;
 
 typedef enum
@@ -165,6 +187,7 @@ typedef struct
 typedef struct Results
 {
 	double countdown;
+	int16_t mvp_id; // match MVP player id, -1 = nobody
 } Results;
 
 typedef struct Server
@@ -176,6 +199,7 @@ typedef struct Server
 	{
 		ST_LOBBY,
 		ST_MAPVOTE,
+		ST_MAPDRAFT,
 		ST_CHARSELECT,
 		ST_GAME,
 		ST_RESULTS
@@ -226,6 +250,13 @@ bool game_broadcast_spectators(Server *server);
 int server_total(Server *server);
 int server_ingame(Server *server);
 PeerData *server_find_peer(Server *server, uint16_t id);
+
+// force a player to be the exe in the next match (consumed by charselect_choose_exe)
+bool server_force_exe(Server *server, uint16_t id);
+void server_force_exe_clear(Server *server);
+bool server_force_exe_key(const char* key, char* confirm, size_t cap);
+bool server_whitelist_set(bool on);
+bool server_demonize_set(bool on);
 bool server_disconnect(Server *server, ENetPeer *peer, DisconnectReason reason, const char *text);
 bool server_disconnect_id(Server *server, uint16_t id, DisconnectReason reason, const char *text);
 

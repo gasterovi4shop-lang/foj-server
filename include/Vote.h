@@ -6,7 +6,8 @@
 typedef enum
 {
 	VOTE_KICK,
-	VOTE_PRACTICE
+	VOTE_PRACTICE,
+	VOTE_MAPDRAFT
 } VoteType;
 
 typedef enum

@@ -36,7 +36,8 @@ SERVER_API Config g_config =
 	.map_list = { true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true, true },
 	.motd = "",
 	.anticheat = true,
-	.pride = true
+	.pride = true,
+	.demonize = true
 };
 
 cJSON*	g_bans = NULL;
@@ -44,6 +45,7 @@ cJSON*	g_timeouts = NULL;
 cJSON*	g_ops = NULL;
 cJSON*	g_opids = NULL;
 cJSON*	g_custom_ids = NULL;
+cJSON*	g_whitelist = NULL;
 Mutex	g_banMut;
 Mutex	g_timeoutMut;
 Mutex	g_opMut;
@@ -166,6 +168,9 @@ bool config_init(void)
 	g_config.anticheat =	cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "anticheat"));
 	g_config.pride =		cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "pride"));
 
+	cJSON* jdemonize = cJSON_GetObjectItemCaseSensitive(json, "demonize");
+	g_config.demonize = jdemonize ? cJSON_IsTrue(jdemonize) : true; // старые конфиги - демонизация включена
+
 	// configs made before the news feature lack the keys: fall back to defaults
 	if (g_config.news_port <= 0 || g_config.news_port > 65535)
 		g_config.news_port = 1500;
@@ -183,6 +188,7 @@ init_balls:
 	RAssert(collection_init(&g_ops,		OPERATORS_FILE, "{ \"127.0.0.1\": \"Host (127.0.0.1)\" }"));
 	RAssert(collection_init(&g_opids,	OPERATOR_IDS_FILE, "{}"));
 	RAssert(collection_init(&g_custom_ids,	CUSTOM_IDS_FILE, "{}"));
+	RAssert(collection_init(&g_whitelist,	WHITELIST_FILE, "{ \"enabled\": false, \"ids\": [] }"));
 
 	if (!g_config.anticheat)
 	{
@@ -206,6 +212,7 @@ SERVER_API bool config_save(void)
 	cJSON_AddItemToObject(json, "log_file", cJSON_CreateBool(g_config.log_file));
 	cJSON_AddItemToObject(json, "log_debug", cJSON_CreateBool(g_config.log_debug));
 	cJSON_AddItemToObject(json, "pride", cJSON_CreateBool(g_config.pride));
+	cJSON_AddItemToObject(json, "demonize", cJSON_CreateBool(g_config.demonize));
 	cJSON_AddItemToObject(json, "motd", cJSON_CreateString(g_config.motd));
 
 	RAssert(collection_save(CONFIG_FILE, json));
@@ -606,6 +613,36 @@ bool op_id_check(const char* accid, bool* result)
 	return true;
 }
 
+bool op_id_revoke(const char* accid)
+{
+	if (!accid || accid[0] == '\0')
+		return false;
+
+	MutexLock(g_opMut);
+	{
+		if (!cJSON_HasObjectItem(g_opids, accid))
+		{
+			MutexUnlock(g_opMut);
+			return false;
+		}
+
+		cJSON_DeleteItemFromObject(g_opids, accid);
+	}
+	bool res = collection_save(OPERATOR_IDS_FILE, g_opids);
+	MutexUnlock(g_opMut);
+	return res;
+}
+
+// ключи кастомных ID хранятся в верхнем регистре - в том же, в котором
+// account_id выдаёт accid ("%08llX"); старые записи могли быть записаны
+// в нижнем регистре - при обращении подхватываем и их
+static void custom_id_key(const char* accid, char* out, size_t cap)
+{
+	snprintf(out, cap, "%s", accid ? accid : "");
+	for (char* p = out; *p; p++)
+		*p = (char)toupper((unsigned char)*p);
+}
+
 bool custom_id_set(const char* accid, const char* custom_id)
 {
 	if (!accid || !accid[0] || !custom_id || strlen(custom_id) < 3 || strlen(custom_id) > 18)
@@ -621,11 +658,14 @@ bool custom_id_set(const char* accid, const char* custom_id)
 	}
 	normalized[strlen(custom_id)] = '\0';
 
+	char key[19];
+	custom_id_key(accid, key, sizeof(key));
+
 	MutexLock(g_opMut);
 	{
 		for (cJSON* item = g_custom_ids->child; item; item = item->next)
 		{
-			if (strcmp(item->string, accid) != 0 &&
+			if (strcmp(item->string, key) != 0 &&
 				strcmp(cJSON_GetStringValue(item), normalized) == 0)
 			{
 				MutexUnlock(g_opMut);
@@ -633,10 +673,13 @@ bool custom_id_set(const char* accid, const char* custom_id)
 			}
 		}
 
-		if (cJSON_HasObjectItem(g_custom_ids, accid))
-			cJSON_ReplaceItemInObject(g_custom_ids, accid, cJSON_CreateString(normalized));
+		if (cJSON_HasObjectItem(g_custom_ids, key))
+			cJSON_ReplaceItemInObject(g_custom_ids, key, cJSON_CreateString(normalized));
 		else
-			cJSON_AddItemToObject(g_custom_ids, accid, cJSON_CreateString(normalized));
+			cJSON_AddItemToObject(g_custom_ids, key, cJSON_CreateString(normalized));
+
+		// NB: cJSON сравнивает ключи без учёта регистра - отдельной записи
+		// с тем же ключом в другом регистре быть не может
 	}
 	bool res = collection_save(CUSTOM_IDS_FILE, g_custom_ids);
 	MutexUnlock(g_opMut);
@@ -648,9 +691,14 @@ bool custom_id_get(const char* accid, char* out, size_t cap)
 	if (!out || !cap)
 		return false;
 
+	char key[19];
+	custom_id_key(accid, key, sizeof(key));
+
 	MutexLock(g_opMut);
 	{
-		const char* value = cJSON_GetStringValue(cJSON_GetObjectItem(g_custom_ids, accid));
+		const char* value = cJSON_GetStringValue(cJSON_GetObjectItem(g_custom_ids, key));
+		if (!value && strcmp(key, accid) != 0)
+			value = cJSON_GetStringValue(cJSON_GetObjectItem(g_custom_ids, accid)); // старый ключ
 		snprintf(out, cap, "%s", value && value[0] ? value : accid);
 	}
 	MutexUnlock(g_opMut);
@@ -662,17 +710,152 @@ bool custom_id_reset(const char* accid)
 	if (!accid || !accid[0])
 		return false;
 
+	char key[19];
+	custom_id_key(accid, key, sizeof(key));
+
 	MutexLock(g_opMut);
 	{
-		if (!cJSON_HasObjectItem(g_custom_ids, accid))
+		if (!cJSON_HasObjectItem(g_custom_ids, key) && !cJSON_HasObjectItem(g_custom_ids, accid))
 		{
 			MutexUnlock(g_opMut);
 			return true;
 		}
 
+		cJSON_DeleteItemFromObject(g_custom_ids, key);
 		cJSON_DeleteItemFromObject(g_custom_ids, accid);
 	}
 	bool res = collection_save(CUSTOM_IDS_FILE, g_custom_ids);
 	MutexUnlock(g_opMut);
 	return res;
+}
+
+// ------------------------------------------------------------------ whitelist
+// {"enabled": bool, "ids": ["3FA9C2B1", ...]}; когда режим включен, на сервер
+// пускаются только игроки с ID из списка. Кастомный ID тоже принимается.
+
+static void wl_normalize(const char* id, char* out, size_t cap)
+{
+	snprintf(out, cap, "%s", id ? id : "");
+	for (char* p = out; *p; p++)
+		*p = (char)toupper((unsigned char)*p);
+}
+
+static cJSON* wl_ids(void)
+{
+	cJSON* ids = cJSON_GetObjectItemCaseSensitive(g_whitelist, "ids");
+	if (!cJSON_IsArray(ids))
+	{
+		cJSON_DeleteItemFromObject(g_whitelist, "ids");
+		ids = cJSON_CreateArray();
+		cJSON_AddItemToObject(g_whitelist, "ids", ids);
+	}
+	return ids;
+}
+
+SERVER_API bool wl_enabled(void)
+{
+	cJSON* e = cJSON_GetObjectItemCaseSensitive(g_whitelist, "enabled");
+	return cJSON_IsTrue(e);
+}
+
+SERVER_API bool wl_set_enabled(bool on)
+{
+	bool res = true;
+
+	MutexLock(g_opMut);
+	{
+		// ReplaceItemInObject ничего не делает, если ключа нет - delete+add
+		cJSON_DeleteItemFromObject(g_whitelist, "enabled");
+		cJSON_AddBoolToObject(g_whitelist, "enabled", on);
+		res = collection_save(WHITELIST_FILE, g_whitelist);
+	}
+	MutexUnlock(g_opMut);
+
+	Info("Whitelist mode: %s", on ? "ON" : "OFF");
+	return res;
+}
+
+SERVER_API bool wl_add(const char* accid)
+{
+	if (!accid || !accid[0])
+		return false;
+
+	bool res = true;
+	char key[19];
+	wl_normalize(accid, key, sizeof(key));
+
+	MutexLock(g_opMut);
+	{
+		cJSON* ids = wl_ids();
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, ids)
+		{
+			const char* value = cJSON_GetStringValue(item);
+			if (value && strcmp(value, key) == 0)
+			{
+				MutexUnlock(g_opMut);
+				return true; // уже в списке
+			}
+		}
+
+		cJSON_AddItemToArray(ids, cJSON_CreateString(key));
+		res = collection_save(WHITELIST_FILE, g_whitelist);
+	}
+	MutexUnlock(g_opMut);
+	return res;
+}
+
+SERVER_API bool wl_remove(const char* accid)
+{
+	if (!accid || !accid[0])
+		return false;
+
+	char key[19];
+	wl_normalize(accid, key, sizeof(key));
+
+	bool res = false;
+
+	MutexLock(g_opMut);
+	{
+		cJSON* ids = wl_ids();
+		int idx = 0;
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, ids)
+		{
+			const char* value = cJSON_GetStringValue(item);
+			if (value && strcmp(value, key) == 0)
+			{
+				cJSON_DeleteItemFromArray(ids, idx);
+				res = collection_save(WHITELIST_FILE, g_whitelist);
+				break;
+			}
+
+			idx++;
+		}
+	}
+	MutexUnlock(g_opMut);
+	return res;
+}
+
+SERVER_API bool wl_check(const char* accid)
+{
+	char key[19];
+	wl_normalize(accid, key, sizeof(key));
+
+	MutexLock(g_opMut);
+	{
+		cJSON* ids = wl_ids();
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, ids)
+		{
+			const char* value = cJSON_GetStringValue(item);
+			if (value && strcmp(value, key) == 0)
+			{
+				MutexUnlock(g_opMut);
+				return true;
+			}
+		}
+	}
+	MutexUnlock(g_opMut);
+	return false;
 }

@@ -33,6 +33,7 @@ bool charselect_choose_exe(Server *server, uint16_t *id)
 	RAssert(server);
 
 	uint32_t weight = 0;
+	PeerData *forced = NULL;
 
 	for (size_t i = 0; i < server->peers.capacity; i++)
 	{
@@ -47,7 +48,24 @@ bool charselect_choose_exe(Server *server, uint16_t *id)
 		peer->exe_char = EX_NONE;
 		peer->surv_char = CH_NONE;
 
+		if (server->lobby.exe_forced && peer->id == server->lobby.exe_forced_id)
+			forced = peer;
+
 		weight += peer->exe_chance;
+	}
+
+	// the force is one-shot: it only applies to this pick
+	server->lobby.exe_forced = false;
+	server->lobby.exe_forced_id = 0;
+
+	if (forced)
+	{
+		Info("%s (id %d, c %d) is exe (forced)!", forced->nickname.value, forced->id, forced->exe_chance);
+
+		forced->exe_chance = 1 + rand() % 1;
+		*id = forced->id;
+
+		return true;
 	}
 
 	if (weight == 0)
@@ -182,7 +200,8 @@ bool charselect_state_handle(PeerData *v, Packet *packet)
 	{
 		PacketRead(pid, packet, packet_read16, uint16_t);
 		PacketRead(msg, packet, packet_readstr, String);
-		AssertOrDisconnect(v->server, string_length(&msg) <= 40);
+		//слишком длинное сообщение обрезается до 40 символов вместо кика клиента
+		packet_truncate_chatmsg(packet, 40);
 		admin_log_chat(v->server->id, v->nickname.value, v->accid, v->id, msg.value);
 
 		v->timeout = 0;
@@ -238,6 +257,10 @@ bool charselect_init(int8_t map, Server *server)
 {
 	Debug("Attepting to enter ST_CHARSELECT...");
 	RAssert(server);
+
+	// any map drafted earlier is either used up or overridden
+	server->lobby.mapdraft_map = -1;
+
 	RAssert(charselect_choose_exe(server, &server->lobby.exe));
 
 	if (server->lobby.exe == -1)

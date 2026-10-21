@@ -58,13 +58,25 @@ static bool status_lock(Server* server)
 	return true;
 }
 
+static bool event_lock(void)
+{
+	MutexLock(g_eventMut);
+	return true;
+}
+
+static bool event_unlock(void)
+{
+	MutexUnlock(g_eventMut);
+	return true;
+}
+
 SERVER_API void admin_log_chat(int server, const char* nick, const char* accid,
 	int player_id, const char* text)
 {
 	if (!text)
 		return;
 
-	MutexLock(g_eventMut);
+	event_lock();
 	{
 		ChatLogEntry* e = &g_events[g_events_head];
 		time_t now = time(NULL);
@@ -79,7 +91,7 @@ SERVER_API void admin_log_chat(int server, const char* nick, const char* accid,
 		if (g_events_head == 0)
 			g_events_full = true;
 	}
-	MutexUnlock(g_eventMut);
+	event_unlock();
 }
 
 static const char* state_name(int state)
@@ -372,6 +384,27 @@ SERVER_API bool admin_profile(const char* accid, char* nick, size_t nickcap, dou
 	known_lock();
 	{
 		KnownId* e = accid ? known_find(accid) : NULL;
+
+		// не нашли как системный ID - возможно, передан кастомный: ищем владельца
+		if (!e && accid && accid[0])
+		{
+			char low[19];
+			snprintf(low, sizeof(low), "%s", accid);
+			for (char* p = low; *p; p++)
+				*p = (char)tolower((unsigned char)*p);
+
+			MutexLock(g_opMut);
+			{
+				for (cJSON* item = g_custom_ids->child; item && !e; item = item->next)
+				{
+					const char* value = cJSON_GetStringValue(item);
+					if (value && strcmp(value, low) == 0)
+						e = known_find(item->string);
+				}
+			}
+			MutexUnlock(g_opMut);
+		}
+
 		if (e)
 		{
 			known = true;
@@ -458,8 +491,8 @@ static cJSON* handle_custom_id(const cJSON* req)
 
 	char accid[16];
 	snprintf(accid, sizeof(accid), "%s", raw_id);
-	for (char* p = accid; *p; p++)
-		*p = (char)tolower((unsigned char)*p);
+	// ключ кастомного ID хранится в том же регистре, что выдаёт account_id
+	// (верхний регистр hex) - приводить к нижнему нельзя, сломает поиск
 
 	if (strcmp(action, "get") == 0)
 	{
@@ -555,6 +588,11 @@ static cJSON* handle_known(const cJSON* req)
 			cJSON_AddStringToObject(item, "id", g_known[i].accid);
 			cJSON_AddStringToObject(item, "nick", g_known[i].nick);
 			cJSON_AddNumberToObject(item, "seconds", g_known[i].seconds);
+
+			char cid[19];
+			custom_id_get(g_known[i].accid, cid, sizeof(cid));
+			cJSON_AddStringToObject(item, "custom_id", strcmp(cid, g_known[i].accid) != 0 ? cid : "");
+
 			cJSON_AddItemToArray(arr, item);
 		}
 	}
@@ -675,6 +713,7 @@ static cJSON* handle_ops(void)
 	cJSON* resp = cJSON_CreateObject();
 	cJSON* arr = cJSON_AddArrayToObject(resp, "ops");
 
+	// IP-based (legacy Operators.json)
 	MutexLock(g_opMut);
 	{
 		cJSON* op = NULL;
@@ -684,12 +723,42 @@ static cJSON* handle_ops(void)
 				continue;
 
 			cJSON* item = cJSON_CreateObject();
-			cJSON_AddStringToObject(item, "ip", op->string);
-			cJSON_AddStringToObject(item, "name", cJSON_GetStringValue(op));
+			cJSON_AddStringToObject(item, "key", op->string);
+			cJSON_AddStringToObject(item, "kind", "ip");
+			cJSON_AddStringToObject(item, "name", cJSON_GetStringValue(op) ? cJSON_GetStringValue(op) : op->string);
 			cJSON_AddItemToArray(arr, item);
 		}
 	}
 	MutexUnlock(g_opMut);
+
+	// ID-based (OperatorIds.json): резолвим ник из реестра известных ID
+	char idkeys[128][16];
+	int nids = 0;
+
+	MutexLock(g_opMut);
+	{
+		cJSON* op = NULL;
+		cJSON_ArrayForEach(op, g_opids)
+		{
+			if (!op->string || nids >= 128)
+				continue;
+			snprintf(idkeys[nids], sizeof(idkeys[nids]), "%s", op->string);
+			nids++;
+		}
+	}
+	MutexUnlock(g_opMut);
+
+	for (int i = 0; i < nids; i++)
+	{
+		char nick[32] = "";
+		admin_profile(idkeys[i], nick, sizeof(nick), NULL);
+
+		cJSON* item = cJSON_CreateObject();
+		cJSON_AddStringToObject(item, "key", idkeys[i]);
+		cJSON_AddStringToObject(item, "kind", "id");
+		cJSON_AddStringToObject(item, "name", nick[0] ? nick : idkeys[i]);
+		cJSON_AddItemToArray(arr, item);
+	}
 
 	return resp;
 }
@@ -750,7 +819,8 @@ static cJSON* handle_opadd(const cJSON* req)
 		return resp;
 	}
 
-	if (!op_add(target->nickname.value, target->ip.value))
+	// опка привязывается к ID аккаунта - переживает смену IP и перезаходы
+	if (!op_id_add(target->accid))
 	{
 		cJSON_AddBoolToObject(resp, "ok", false);
 		cJSON_AddStringToObject(resp, "error", "failed to save operator");
@@ -766,20 +836,93 @@ static cJSON* handle_opdel(const cJSON* req)
 {
 	cJSON* resp = cJSON_CreateObject();
 
-	cJSON* jip = cJSON_GetObjectItemCaseSensitive(req, "ip");
-	const char* ip = cJSON_GetStringValue(jip);
+	const char* key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "key"));
+	const char* kind = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "kind"));
 
-	if (!ip || ip[0] == '\0')
+	if (!key || key[0] == '\0')
 	{
 		cJSON_AddBoolToObject(resp, "ok", false);
-		cJSON_AddStringToObject(resp, "error", "missing ip");
+		cJSON_AddStringToObject(resp, "error", "missing key");
 		return resp;
 	}
 
-	bool ok = op_revoke(ip);
+	// совместимость со старыми клиентами: поле ip = IP-based оператор
+	if (!kind)
+		kind = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "ip")) ? "ip" : NULL;
+
+	bool ok;
+	if (kind && strcmp(kind, "id") == 0)
+		ok = op_id_revoke(key);
+	else
+		ok = op_revoke(key);
+
 	cJSON_AddBoolToObject(resp, "ok", ok);
 	if (!ok)
 		cJSON_AddStringToObject(resp, "error", "no such operator");
+
+	return resp;
+}
+
+static cJSON* handle_demonize(const cJSON* req)
+{
+	cJSON* resp = cJSON_CreateObject();
+	const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "action"));
+
+	if (action && (strcmp(action, "on") == 0 || strcmp(action, "off") == 0))
+	{
+		server_demonize_set(strcmp(action, "on") == 0);
+	}
+
+	cJSON_AddBoolToObject(resp, "ok", true);
+	cJSON_AddBoolToObject(resp, "enabled", g_config.demonize);
+	return resp;
+}
+
+static cJSON* handle_wl(const cJSON* req)
+{
+	cJSON* resp = cJSON_CreateObject();
+	const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "action"));
+	if (!action || !action[0])
+		action = "status";
+
+	if (strcmp(action, "on") == 0 || strcmp(action, "off") == 0)
+	{
+		server_whitelist_set(strcmp(action, "on") == 0);
+	}
+	else if (strcmp(action, "add") == 0 || strcmp(action, "remove") == 0)
+	{
+		const char* id = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "id"));
+		bool ok = false;
+
+		if (id && id[0])
+			ok = (strcmp(action, "add") == 0) ? wl_add(id) : wl_remove(id);
+
+		cJSON_AddBoolToObject(resp, "ok", ok);
+		if (!ok)
+			cJSON_AddStringToObject(resp, "error", "missing or invalid id");
+	}
+	else if (strcmp(action, "status") != 0)
+	{
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "unknown action");
+		return resp;
+	}
+
+	cJSON_AddBoolToObject(resp, "ok", true);
+	cJSON_AddBoolToObject(resp, "enabled", wl_enabled());
+
+	cJSON* arr = cJSON_AddArrayToObject(resp, "ids");
+	MutexLock(g_opMut);
+	{
+		cJSON* ids = cJSON_GetObjectItemCaseSensitive(g_whitelist, "ids");
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, ids)
+		{
+			if (cJSON_IsString(item) && item->valuestring[0])
+				cJSON_AddItemToArray(arr, cJSON_CreateString(item->valuestring));
+		}
+	}
+	MutexUnlock(g_opMut);
 
 	return resp;
 }
@@ -1002,6 +1145,10 @@ static void admin_client_thread(void* arg)
 				resp = handle_ops();
 			else if (cmd && strcmp(cmd, "bans") == 0)
 				resp = handle_bans();
+			else if (cmd && strcmp(cmd, "wl") == 0)
+				resp = handle_wl(req);
+			else if (cmd && strcmp(cmd, "demonize") == 0)
+				resp = handle_demonize(req);
 			else if (cmd && strcmp(cmd, "checkid") == 0)
 				resp = handle_checkid(req);
 			else if (cmd && strcmp(cmd, "profile") == 0)

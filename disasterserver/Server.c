@@ -69,6 +69,18 @@ bool peer_identity_process(PeerData *v, const char *addr, const BanInfo *ban, ui
 		return false;
 	}
 
+	// whitelist mode: пока включен, на сервер пускают только ID из списка
+	// (системный или кастомный); проверка после бана - бан важнее
+	if (wl_enabled() && !wl_check(v->accid) && !wl_check(v->custom_id))
+	{
+		char wlmsg[128];
+		Info("%s rejected by whitelist (id %s)", v->nickname.value, v->accid);
+		snprintf(wlmsg, sizeof(wlmsg), "Server is in whitelist mode. Ask admins to add your ID: %s", v->accid);
+		v->should_timeout = false;
+		RAssert(server_disconnect(v->server, v->peer, DR_OTHER, wlmsg));
+		return false;
+	}
+
 	if (v->server->peers.noitems >= 7)
 	{
 		v->should_timeout = false;
@@ -201,6 +213,8 @@ bool peer_identity(PeerData *v, Packet *packet)
 	RAssert(ban_check(udid.value, v->ip.value, &ban));
 	if (!ban.banned)
 		ban_check(v->accid, "", &ban); // ban by short account id
+	if (!ban.banned && strcmp(v->custom_id, v->accid) != 0)
+		ban_check(v->custom_id, "", &ban); // ban by custom id
 	RAssert(timeout_check(udid.value, v->ip.value, &timeout));
 	RAssert(op_check(v->ip.value, &v->op));
 	{
@@ -454,6 +468,7 @@ bool server_worker(Server *server)
 				case ST_LOBBY:
 				case ST_CHARSELECT:
 				case ST_MAPVOTE:
+				case ST_MAPDRAFT:
 					lobby_state_tick(server);
 					break;
 
@@ -611,6 +626,23 @@ PeerData *server_find_peer(Server *server, uint16_t id)
 	return NULL;
 }
 
+bool server_force_exe(Server *server, uint16_t id)
+{
+	PeerData *peer = server_find_peer(server, id);
+	if (!peer || !peer->in_game)
+		return false;
+
+	server->lobby.exe_forced = true;
+	server->lobby.exe_forced_id = id;
+	return true;
+}
+
+void server_force_exe_clear(Server *server)
+{
+	server->lobby.exe_forced = false;
+	server->lobby.exe_forced_id = 0;
+}
+
 bool server_broadcast(Server *server, Packet *packet, bool reliable)
 {
 	for (size_t i = 0; i < server->peers.capacity; i++)
@@ -667,6 +699,7 @@ bool server_state_joined(PeerData *v)
 	case ST_LOBBY:
 	case ST_CHARSELECT:
 	case ST_MAPVOTE:
+	case ST_MAPDRAFT:
 		return lobby_state_join(v);
 
 	case ST_GAME:
@@ -686,6 +719,7 @@ bool server_state_handle(PeerData *v, Packet *packet)
 	case ST_LOBBY:
 	case ST_CHARSELECT:
 	case ST_MAPVOTE:
+	case ST_MAPDRAFT:
 		return lobby_state_handle(v, packet);
 
 	case ST_GAME:
@@ -716,11 +750,16 @@ bool server_state_left(PeerData *v)
 		game_broadcast_spectators(v->server);
 	}
 
+	//a forced exe who left the server voids the force
+	if (v->server->lobby.exe_forced && v->server->lobby.exe_forced_id == v->id)
+		server_force_exe_clear(v->server);
+
 	switch (v->server->state)
 	{
 	case ST_LOBBY:
 	case ST_CHARSELECT:
 	case ST_MAPVOTE:
+	case ST_MAPDRAFT:
 		return lobby_state_left(v);
 
 	case ST_GAME:
@@ -937,6 +976,9 @@ bool server_host_ban(Server* server, const char* nick, const char* dur, const ch
 	RAssert(ban_add(target->nickname.value, target->udid.value, target->ip.value, expires, reason));
 	// plus a ban keyed by the short account id - the primary ban key
 	RAssert(ban_add(target->nickname.value, target->accid, "", expires, reason));
+	// and by the custom id, if the player has one (it is what others see)
+	if (strcmp(target->custom_id, target->accid) != 0)
+		RAssert(ban_add(target->nickname.value, target->custom_id, "", expires, reason));
 
 	BanInfo info = { 0 };
 	info.banned = true;
@@ -1006,7 +1048,8 @@ bool server_host_ban_udid(const char* udid, const char* dur, const char* reason,
 		{
 			PeerData* peer = (PeerData*)srv->peers.ptr[p];
 			// под .banid подходит и короткий ID аккаунта (accid), и старый udid
-			if (peer && (strcmp(peer->accid, udid) == 0 || strcmp(peer->udid.value, udid) == 0))
+			if (peer && (strcmp(peer->accid, udid) == 0 || strcmp(peer->udid.value, udid) == 0 ||
+				strcmp(peer->custom_id, udid) == 0))
 			{
 				online = peer;
 				snprintf(nick, sizeof(nick), "%s", peer->nickname.value);
@@ -1055,7 +1098,8 @@ static PeerData* host_find_peer_by_id(Server** out_srv, const char* id)
 			for (size_t p = 0; p < srv->peers.capacity; p++)
 			{
 				PeerData* peer = (PeerData*)srv->peers.ptr[p];
-				if (peer && (strcmp(peer->accid, id) == 0 || strcmp(peer->udid.value, id) == 0))
+				if (peer && (strcmp(peer->accid, id) == 0 || strcmp(peer->udid.value, id) == 0 ||
+					strcmp(peer->custom_id, id) == 0))
 				{
 					target = peer;
 					*out_srv = srv;
@@ -1101,6 +1145,120 @@ bool server_host_kick_id(const char* id, const char* reason, char* confirm, size
 	return true;
 }
 
+// toggles whitelist mode and announces it in every lobby chat
+bool server_whitelist_set(bool on)
+{
+	if (!wl_set_enabled(on))
+		return false;
+
+	char msg[32];
+	if (on)
+		snprintf(msg, sizeof(msg), "whitelist: @on");
+	else
+		snprintf(msg, sizeof(msg), "whitelist: \\off");
+
+	for (int i = 0; i < disaster_count(); i++)
+	{
+		Server* server = disaster_get(i);
+		if (server)
+			server_broadcast_msg(server, msg);
+	}
+
+	return true;
+}
+
+// toggles survivor demonization and announces it in every lobby chat
+bool server_demonize_set(bool on)
+{
+	g_config.demonize = on;
+	config_save();
+
+	char msg[64];
+	if (on)
+		snprintf(msg, sizeof(msg), "@survivor &demonization: @on");
+	else
+		snprintf(msg, sizeof(msg), "@survivor &demonization: \\off");
+
+	for (int i = 0; i < disaster_count(); i++)
+	{
+		Server* server = disaster_get(i);
+		if (server)
+			server_broadcast_msg(server, msg);
+	}
+
+	return true;
+}
+
+// force exe by nick or account id (accid/custom/udid), searching all lobbies
+bool server_force_exe_key(const char* key, char* confirm, size_t cap)
+{
+	char low[32];
+	snprintf(low, sizeof(low), "%s", key ? key : "");
+	for (char* p = low; *p != '\0'; p++)
+		*p = (char)tolower((unsigned char)*p);
+
+	PeerData* target = NULL;
+
+	for (int i = 0; i < disaster_count() && !target; i++)
+	{
+		Server* srv = disaster_get(i);
+		if (!srv)
+			continue;
+
+		mut_lock(&srv->state_lock);
+		{
+			for (size_t p = 0; p < srv->peers.capacity; p++)
+			{
+				PeerData* peer = (PeerData*)srv->peers.ptr[p];
+				if (!peer)
+					continue;
+
+				char aid[16];
+				snprintf(aid, sizeof(aid), "%s", peer->accid);
+				for (char* q = aid; *q; q++)
+					*q = (char)tolower((unsigned char)*q);
+
+				char cid[19];
+				snprintf(cid, sizeof(cid), "%s", peer->custom_id);
+				for (char* q = cid; *q; q++)
+					*q = (char)tolower((unsigned char)*q);
+
+				if (strcmp(peer->nickname.value, low) == 0 ||
+					strcmp(peer->udid.value, low) == 0 ||
+					strcmp(aid, low) == 0 ||
+					strcmp(cid, low) == 0)
+				{
+					target = peer;
+					break;
+				}
+			}
+		}
+		mut_unlock(&srv->state_lock);
+	}
+
+	if (!target)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "player '%s' isn't on this server" CLRCODE_RST, key);
+		return false;
+	}
+
+	if (!server_force_exe(target->server, target->id))
+	{
+		snprintf(confirm, cap, CLRCODE_RED "can't force exe on %s (not in the lobby)" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
+	Info("Exe forced on %s (id %d) for the next match", target->nickname.value, target->id);
+
+	// announce to everyone in the lobby, not just the console/bot
+	char okmsg[128];
+	snprintf(okmsg, sizeof(okmsg), CLRCODE_GRN "%s~ will be the exe next match" CLRCODE_RST, target->nickname.value);
+	server_broadcast_msg(target->server, okmsg);
+
+	snprintf(confirm, cap, "%s", target->nickname.value);
+	return true;
+}
+
 bool server_host_op_id(const char* id, char* confirm, size_t cap)
 {
 	if (!id || id[0] == '\0')
@@ -1109,14 +1267,29 @@ bool server_host_op_id(const char* id, char* confirm, size_t cap)
 		return false;
 	}
 
-	if (!op_id_add(id))
+	// нормализуем к системному accid: под .opid подходит и кастомный ID
+	Server* srv = NULL;
+	PeerData* target = host_find_peer_by_id(&srv, id);
+	const char* accid = target ? target->accid : id;
+
+	if (!op_id_add(accid))
 	{
 		snprintf(confirm, cap, CLRCODE_RED "failed to save operator" CLRCODE_RST);
 		return false;
 	}
 
-	Info("%s opped by account id", id);
-	snprintf(confirm, cap, CLRCODE_GRN "account %s is now an operator" CLRCODE_RST, id);
+	if (target)
+	{
+		target->op = true; // применяем сразу, не дожидаясь перезахода
+		Info("%s opped by account id", target->nickname.value);
+		snprintf(confirm, cap, CLRCODE_GRN "%s is now an operator" CLRCODE_RST, target->nickname.value);
+	}
+	else
+	{
+		Info("%s opped by account id", accid);
+		snprintf(confirm, cap, CLRCODE_GRN "account %s is now an operator" CLRCODE_RST, accid);
+	}
+
 	return true;
 }
 
@@ -1196,6 +1369,15 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 	{
 	default:
 		return false;
+
+	case CMD_B:
+	{
+		// map draft ban: handled only while ST_MAPDRAFT is running,
+		// otherwise it falls through to a regular chat message
+		if (!mapdraft_cmd_ban(v, msg))
+			return false;
+		break;
+	}
 
 	case CMD_BAN:
 	{
@@ -1344,6 +1526,78 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 		}
 
 		PacketCreate(&pack, SERVER_LOBBY_CHOOSEOP);
+		RAssert(packet_send(v->peer, &pack, true));
+		break;
+	}
+
+	case CMD_EXE:
+	{
+		if (!v->op)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "you aren't an operator."));
+			break;
+		}
+
+		if (v->server->state == ST_CHARSELECT)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "too late - the exe is already picked"));
+			break;
+		}
+
+		char nick[32];
+		if (sscanf(msg->value, ".exe %31s", nick) > 0)
+		{
+			// nicknames are stored lowercase
+			for (char* p = nick; *p != '\0'; p++)
+				*p = (char)tolower((unsigned char)*p);
+
+			// .exe none / .exe off cancels a pending force
+			if (strcmp(nick, "none") == 0 || strcmp(nick, "off") == 0)
+			{
+				if (v->server->lobby.exe_forced)
+				{
+					server_force_exe_clear(v->server);
+					// объявление всем в лобби (красный exe, жёлтый cleared)
+					server_broadcast_msg(v->server, "forced \\exe " CLRCODE_YLW "`cleared");
+					RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRN "forced exe cleared"));
+				}
+				else
+					RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "no forced exe is pending"));
+
+				break;
+			}
+
+			// ник или ID аккаунта; поиск по всем лоббиям хоста
+			char confirm[128];
+			if (!server_force_exe_key(nick, confirm, sizeof(confirm)))
+			{
+				RAssert(server_send_msg(v->server, v->peer, confirm));
+				break;
+			}
+
+			char okmsg[128];
+			snprintf(okmsg, sizeof(okmsg), CLRCODE_GRN "%s~ will be the exe next match", confirm);
+			RAssert(server_send_msg(v->server, v->peer, okmsg));
+			break;
+		}
+
+		// no arguments: keep the old pick-a-player flow (same UI as vote kick)
+		// the picker UI only exists in the lobby and the waiting room
+		if (v->server->state != ST_LOBBY && v->server->state != ST_GAME)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "player picker works only in the lobby - use .exe <nick|id>"));
+			break;
+		}
+
+		if (server_ingame(v->server) <= 1)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "not enough players"));
+			break;
+		}
+
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRN "select the player to force as exe"));
+
+		PacketCreate(&pack, SERVER_LOBBY_CHOOSEEXE);
 		RAssert(packet_send(v->peer, &pack, true));
 		break;
 	}
@@ -1515,6 +1769,7 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 		RAssert(server_send_msg(v->server, v->peer, lobby_msg));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vk" CLRCODE_RST " vote kick"));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vp" CLRCODE_RST " vote practice mode"));
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".map_draft" CLRCODE_RST " vote map draft (ban maps with .b)"));
 
 		if (v->op)
 		{
@@ -1652,6 +1907,30 @@ bool server_msg_handle(Server *server, PacketType type, PeerData *v, Packet *pac
 				break;
 			}
 		}
+		break;
+	}
+
+	case CLIENT_LOBBY_CHOOSEEXE:
+	{
+		if (!v->op)
+			break;
+
+		if (v->server->state == ST_CHARSELECT)
+			break;
+
+		PacketRead(pid, packet, packet_read16, uint16_t);
+
+		if (!server_force_exe(v->server, pid))
+		{
+			server_send_msg(v->server, v->peer, CLRCODE_RED "can't force exe on this player");
+			break;
+		}
+
+		PeerData *target = server_find_peer(v->server, pid);
+		char okmsg[128];
+		snprintf(okmsg, 128, CLRCODE_GRN "%s~ will be the exe next match", target->nickname.value);
+		server_broadcast_msg(v->server, okmsg);
+		Info("Exe forced on %s (id %d) for the next match", target->nickname.value, target->id);
 		break;
 	}
 	}

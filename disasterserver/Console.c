@@ -27,10 +27,14 @@ void console_help_text(char* out, size_t cap)
 	snprintf(out, cap,
 		".ban <nick> [time] [reason] - ban (30m/12h/7d/2w/1d12h/perm)\n"
 		".kick <nick> [reason] - kick a player\n"
+		".exe <nick|id|none> - force the exe player for the next match\n"
 		".banid <id> [time] [reason] - ban by account id (works offline)\n"
 		".unbanid <id> - remove a ban by account id\n"
 		".kickid <id> [reason] - kick by account id\n"
 		".opid <id> - grant operator rights by account id\n"
+		".whitelist on|off - whitelist mode: only listed ids can join\n"
+		".whitelist add|del <id> - edit the whitelist\n"
+		".demonize on|off - toggle survivor demonization\n"
 		".myid - show your system account id\n"
 		".set_id <id> - set your custom id (3-18 letters, digits, _ or -)\n"
 		".reset_id [system_id] - reset your custom id; operators may specify another id\n"
@@ -127,7 +131,14 @@ static void out(const char* fmt, ...)
 
 	if (g_outbuf)
 	{
+		// несколько out() подряд разделяем переводом строки
 		size_t len = strlen(line);
+		if (g_outlen > 0 && g_outlen < g_outcap - 1)
+		{
+			g_outbuf[g_outlen++] = '\n';
+			g_outbuf[g_outlen] = '\0';
+		}
+
 		if (g_outlen + len + 1 > g_outcap)
 			len = g_outcap - g_outlen - 1;
 
@@ -197,6 +208,42 @@ static bool console_exec(Server* server, char* line)
 		return true;
 	}
 
+	if (strcmp(cmd, ".exe") == 0)
+	{
+		char* nick = strtok(NULL, " ");
+
+		if (!nick)
+		{
+			out("usage: .exe <nick|id|none> - force the exe player for the next match");
+			return true;
+		}
+
+		// nicknames are stored lowercase
+		for (char* p = nick; *p != '\0'; p++)
+			*p = (char)tolower((unsigned char)*p);
+
+		if (strcmp(nick, "none") == 0 || strcmp(nick, "off") == 0)
+		{
+			if (!server->lobby.exe_forced)
+			{
+				out("no forced exe is pending");
+				return true;
+			}
+
+			server_force_exe_clear(server);
+			// объявление всем в лобби (красный exe, жёлтый cleared)
+			server_broadcast_msg(server, "forced \\exe " CLRCODE_YLW "`cleared");
+			out("forced exe cleared");
+			return true;
+		}
+
+		// ник или ID аккаунта; поиск по всем лоббиям хоста
+		char confirm[256];
+		server_force_exe_key(nick, confirm, sizeof(confirm));
+		out("%s", confirm);
+		return true;
+	}
+
 	if (strcmp(cmd, ".banid") == 0)
 	{
 		char* id = strtok(NULL, " ");
@@ -261,6 +308,56 @@ static bool console_exec(Server* server, char* line)
 		char confirm[256];
 		server_host_op_id(id, confirm, sizeof(confirm));
 		out("%s", confirm);
+		return true;
+	}
+
+	if (strcmp(cmd, ".demonize") == 0)
+	{
+		char* arg = strtok(NULL, " ");
+
+		if (arg && (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0))
+		{
+			server_demonize_set(strcmp(arg, "on") == 0);
+		}
+
+		out("demonization of survivors: %s", g_config.demonize ? "ON" : "OFF");
+		out("usage: .demonize on|off");
+		return true;
+	}
+
+	if (strcmp(cmd, ".whitelist") == 0 || strcmp(cmd, ".wl") == 0)
+	{
+		char* arg = strtok(NULL, " ");
+
+		if (!arg)
+		{
+			out("whitelist mode: %s", wl_enabled() ? "ON" : "OFF");
+			out("usage: .whitelist on|off|add <id>|del <id>");
+			return true;
+		}
+
+		if (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0)
+		{
+			server_whitelist_set(strcmp(arg, "on") == 0);
+			out("whitelist mode: %s", wl_enabled() ? "ON" : "OFF");
+			return true;
+		}
+
+		if (strcmp(arg, "add") == 0 || strcmp(arg, "del") == 0)
+		{
+			char* id = strtok(NULL, " ");
+			if (!id)
+			{
+				out("usage: .whitelist %s <id>", arg);
+				return true;
+			}
+
+			bool ok = (strcmp(arg, "add") == 0) ? wl_add(id) : wl_remove(id);
+			out("%s: %s", ok ? "done" : "failed", id);
+			return true;
+		}
+
+		out("usage: .whitelist on|off|add <id>|del <id>");
 		return true;
 	}
 
@@ -336,7 +433,15 @@ static bool console_exec(Server* server, char* line)
 				if (!peer)
 					continue;
 
-				out("%u: %s", peer->id, peer->nickname.value);
+				// показываем и серверный, и кастомный ID
+				char cid[19];
+				custom_id_get(peer->accid, cid, sizeof(cid));
+
+				if (strcmp(cid, peer->accid) != 0)
+					out("%u: %s - ID: %s (custom: %s)", peer->id, peer->nickname.value, peer->accid, cid);
+				else
+					out("%u: %s - ID: %s", peer->id, peer->nickname.value, peer->accid);
+
 				n++;
 			}
 

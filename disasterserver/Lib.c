@@ -27,7 +27,8 @@ bool allocate_server(uint16_t base_port, uint16_t n)
 			.vote = {
 				.ongoing = 0,
 			},
-			.prac_countdown = 0
+			.prac_countdown = 0,
+			.mapdraft_map = -1
 		}
 	};
 

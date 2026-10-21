@@ -49,6 +49,7 @@ set(SOURCES
 
 	"Lobby.c"
 	"Mapvote.c"
+	"Mapdraft.c"
 	"CharSelect.c"
 	"Game.c"
 	"Results.c"
