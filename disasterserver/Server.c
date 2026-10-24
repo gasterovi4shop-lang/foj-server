@@ -604,6 +604,10 @@ int server_ingame(Server *server)
 		if (!peer)
 			continue;
 
+		// .afk: the peer stays on the server but is not counted as a player
+		if (peer->afk)
+			continue;
+
 		if (peer->in_game)
 			count++;
 	}
@@ -1242,6 +1246,13 @@ bool server_force_exe_key(const char* key, char* confirm, size_t cap)
 		return false;
 	}
 
+	// .afk peers are never the exe: the pick would silently ignore the force
+	if (target->afk)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "%s is afk - clear .afk first" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
 	if (!server_force_exe(target->server, target->id))
 	{
 		snprintf(confirm, cap, CLRCODE_RED "can't force exe on %s (not in the lobby)" CLRCODE_RST, target->nickname.value);
@@ -1376,6 +1387,55 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 		// otherwise it falls through to a regular chat message
 		if (!mapdraft_cmd_ban(v, msg))
 			return false;
+		break;
+	}
+
+	case CMD_AFK:
+	{
+		// .afk toggles the afk flag: an afk peer is never idle-kicked, is not
+		// counted as a player and becomes a spectator once the match starts
+		if ((server->state == ST_GAME || server->state == ST_RESULTS) && v->in_game)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "you can't toggle afk during a match"));
+			break;
+		}
+
+		// too late to join the spectators mid charselect: the exe is already
+		// picked and the roster is locked in
+		if (server->state == ST_CHARSELECT && !v->afk)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "too late - the exe is already picked"));
+			break;
+		}
+
+		v->afk = !v->afk;
+		v->timeout = 0;
+
+		// an afk peer must not keep the lobby from counting as "all ready",
+		// drop the stale ready flag and sync the icons
+		if (v->afk && v->ready && server->state == ST_LOBBY)
+		{
+			v->ready = false;
+
+			PacketCreate(&pack, SERVER_LOBBY_READY_STATE);
+			PacketWrite(&pack, packet_write16, v->id);
+			PacketWrite(&pack, packet_write8, 0);
+			server_broadcast(server, &pack, true);
+		}
+
+		char buffer[512];
+		if (v->afk)
+			snprintf(buffer, 512, "%s~ is now " CLRCODE_YLW "afk", v->nickname.value);
+		else
+			snprintf(buffer, 512, "%s~ is " CLRCODE_GRN "no longer afk" CLRCODE_RST, v->nickname.value);
+		server_broadcast_msg(server, buffer);
+
+		PacketCreate(&pack, SERVER_AFK_STATE);
+		PacketWrite(&pack, packet_write16, v->id);
+		PacketWrite(&pack, packet_write8, v->afk);
+		server_broadcast(server, &pack, true);
+
+		Info("%s " LOG_RST "(id %d) afk: %s", v->nickname.value, v->id, v->afk ? "on" : "off");
 		break;
 	}
 
@@ -1770,6 +1830,7 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vk" CLRCODE_RST " vote kick"));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vp" CLRCODE_RST " vote practice mode"));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".map_draft" CLRCODE_RST " vote map draft (ban maps with .b)"));
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".afk" CLRCODE_RST " toggle afk mode (not kicked, not counted, spectates"));
 
 		if (v->op)
 		{

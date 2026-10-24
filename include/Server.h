@@ -55,6 +55,7 @@ typedef struct PeerData
 	bool voted;
 	bool disconnecting;
 	bool spectating; //watching the running match from the waiting lobby
+	bool afk; //.afk: not counted as a player, moved to spectators when the match starts
 
 	auth_peer_data auth;
 

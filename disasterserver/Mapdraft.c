@@ -33,7 +33,7 @@ static bool mapdraft_announce_turn(Server* server)
 	{
 		uint8_t idx = (lobby->draft_turn + tried) % lobby->draft_order_count;
 		PeerData* peer = server_find_peer(server, lobby->draft_order[idx]);
-		if (!peer || !peer->in_game)
+		if (!peer || !peer->in_game || peer->afk)
 			continue;
 
 		lobby->draft_turn = idx;
@@ -158,7 +158,7 @@ bool mapdraft_init(Server* server)
 	for (size_t i = 0; i < server->peers.capacity; i++)
 	{
 		PeerData* peer = (PeerData*)server->peers.ptr[i];
-		if (!peer || !peer->in_game)
+		if (!peer || !peer->in_game || peer->afk)
 			continue;
 
 		// insertion sort by id

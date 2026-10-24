@@ -14,8 +14,10 @@ bool vote_init(Server* server, Vote* vote, VoteType type, uint16_t id)
 			continue;
 		
 		peer->can_vote = (peer->id != id);
-		
-		if(peer->can_vote)
+
+		// .afk peers are not counted as players: they don't inflate the
+		// threshold the vote has to reach
+		if(peer->can_vote && !peer->afk)
 			vote->votetotal++;
 	}
 

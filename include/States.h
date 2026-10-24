@@ -48,6 +48,7 @@ typedef struct Entity
 #define CMD_MYID 45848821
 #define CMD_MAPDRAFT 791961744
 #define CMD_B 1524
+#define CMD_AFK 1466872
 
 bool lobby_init				(Server* server);
 bool lobby_check_countdown	(Server* server);

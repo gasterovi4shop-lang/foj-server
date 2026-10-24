@@ -1110,10 +1110,21 @@ static void admin_client_thread(void* arg)
 	int sock = (int)(intptr_t)arg;
 	char line[ADMIN_MAX_LINE];
 
+	// таймаут на приём запроса: мёртвое подключение не должно висеть вечно
+	{
+#ifdef _WIN32
+		DWORD rcv_to = 10000;
+#else
+		struct timeval rcv_to = { 10, 0 };
+#endif
+		setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcv_to, sizeof(rcv_to));
+	}
+
 	cJSON* resp = NULL;
 
 	if (admin_recv_line(sock, line, sizeof(line)))
 	{
+		Info("Admin API: request %s", line);
 		cJSON* req = cJSON_ParseWithLength(line, strlen(line));
 		if (req)
 		{
@@ -1276,6 +1287,8 @@ static void admin_listen_thread(void* arg)
 		int client = (int)accept(listener, NULL, NULL);
 		if (client < 0)
 			continue;
+
+		Info("Admin API: client connected.");
 
 		// one throwaway thread per client: admin requests are short-lived
 		Thread th;

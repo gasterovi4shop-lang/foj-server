@@ -18,6 +18,11 @@ bool charselect_check_state(Server *server)
 		if (!peer->in_game)
 			continue;
 
+		// .afk peers are not counted: the match starts once every regular
+		// player has picked
+		if (peer->afk)
+			continue;
+
 		if (peer->exe_char == EX_NONE && peer->surv_char == CH_NONE)
 			should = false;
 	}
@@ -42,6 +47,10 @@ bool charselect_choose_exe(Server *server, uint16_t *id)
 			continue;
 
 		if (!peer->in_game)
+			continue;
+
+		// .afk peers never become the exe, a forced pick on them is ignored
+		if (peer->afk)
 			continue;
 
 		// Reset all characters
@@ -78,7 +87,7 @@ bool charselect_choose_exe(Server *server, uint16_t *id)
 		if (!peer)
 			continue;
 
-		if (!peer->in_game)
+		if (!peer->in_game || peer->afk)
 			continue;
 
 		if (peer->exe_chance >= 100)
@@ -119,6 +128,13 @@ bool charselect_state_handle(PeerData *v, Packet *packet)
 		if (!v->in_game)
 			break;
 
+		// .afk peers only watch the select screen
+		if (v->afk)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "you're afk - you don't take part in this match"));
+			break;
+		}
+
 		// Sanity check
 		AssertOrDisconnect(v->server, v->server->lobby.exe == v->id);
 		PacketRead(id, packet, packet_read8, uint8_t);
@@ -152,6 +168,13 @@ bool charselect_state_handle(PeerData *v, Packet *packet)
 	{
 		if (!v->in_game)
 			break;
+
+		// .afk peers only watch the select screen
+		if (v->afk)
+		{
+			RAssert(server_send_msg(v->server, v->peer, CLRCODE_RED "you're afk - you don't take part in this match"));
+			break;
+		}
 
 		if (v->surv_char != CH_NONE)
 			break;
@@ -236,6 +259,10 @@ bool charselect_state_tick(Server *server)
 					continue;
 
 				if (!peer->in_game)
+					continue;
+
+				// .afk peers are never kicked for not picking
+				if (peer->afk)
 					continue;
 
 				if (peer->exe_char == EX_NONE && peer->surv_char == CH_NONE)

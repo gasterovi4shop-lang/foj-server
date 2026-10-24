@@ -153,6 +153,14 @@ bool game_init(int exe, int8_t map, Server* server)
 		//no one is spectating a match that is just starting
 		v->spectating = false;
 
+		// .afk peers don't take part in the match: drop them into the
+		// spectator role right away, before the rosters are pushed out
+		if (v->afk)
+		{
+			v->in_game = false;
+			v->spectating = true;
+		}
+
 		if (!v->in_game)
 			continue;
 
@@ -174,6 +182,30 @@ bool game_init(int exe, int8_t map, Server* server)
 	Packet pack;
 	PacketCreate(&pack, SERVER_LOBBY_GAME_START);
 	server_broadcast(server, &pack, true);
+
+	// drop afk peers from the match roster of every participant: their lobby
+	// entry (no character picked, never spawned) would otherwise render as a
+	// glitched icon in the health bar and the tab list on clients without
+	// afk-aware drawing. Sent only to in-game peers - waiting peers legitimately
+	// list afk players in the waiting room; sent after GAME_START so recipients
+	// process it in the in-match branch of the player-left handler
+	for (size_t i = 0; i < server->peers.capacity; i++)
+	{
+		PeerData* afk = (PeerData*)server->peers.ptr[i];
+		if (!afk || !afk->afk)
+			continue;
+
+		for (size_t j = 0; j < server->peers.capacity; j++)
+		{
+			PeerData* recipient = (PeerData*)server->peers.ptr[j];
+			if (!recipient || !recipient->in_game)
+				continue;
+
+			PacketCreate(&pack, SERVER_PLAYER_LEFT);
+			PacketWrite(&pack, packet_write16, afk->id);
+			RAssert(packet_send(recipient->peer, &pack, true));
+		}
+	}
 
 	for (size_t i = 0; i < server->peers.capacity; i++)
 	{
@@ -1349,7 +1381,7 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 				break;
 
 			SET_FLAG(v->plr.flags, PLAYER_DEAD);
-			if (g_config.demonize && (v->plr.flags & PLAYER_REVIVED || v->server->game.time_sec < TICKSPERSEC * 2))
+			if (v->plr.flags & PLAYER_REVIVED || v->server->game.time_sec < TICKSPERSEC * 2)
 			{
 				RAssert(game_demonize(v->server, v));
 			}
@@ -1980,7 +2012,7 @@ bool game_player_tick(Server* server)
 				}
 			}
 
-			if (g_config.demonize && server->game.time_sec < TICKSPERSEC * 2)
+			if (server->game.time_sec < TICKSPERSEC * 2)
 			{
 				game_demonize(server, data);
 				continue;

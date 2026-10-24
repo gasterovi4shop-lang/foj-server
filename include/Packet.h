@@ -195,7 +195,11 @@ typedef enum
 	// u8 count, count x (u16 nid, s8 pet): pet ids of in-game players for
 	// spectators; sent on CLIENT_SPECTATE_SYNC, appended at the end so older
 	// clients just ignore the unknown type
-	SERVER_SPECTATE_PETS
+	SERVER_SPECTATE_PETS,
+
+	// u16 pid, u8 enabled: a player toggled afk mode with .afk; appended at
+	// the end so older clients just ignore the unknown type
+	SERVER_AFK_STATE
 } PacketType;
 
 typedef struct

@@ -49,6 +49,13 @@ bool mapvote_state_handle(PeerData* v, Packet* packet)
 			if(!v->in_game)
 				break;
 
+			// .afk peers only watch the vote, they don't cast one
+			if(v->afk)
+			{
+				server_send_msg(v->server, v->peer, CLRCODE_RED "you're afk - your vote doesn't count.");
+				break;
+			}
+
 			PacketRead(map, packet, packet_read8, uint8_t);
 			AssertOrDisconnect(v->server, !v->voted);
 			AssertOrDisconnect(v->server, map >= 0);

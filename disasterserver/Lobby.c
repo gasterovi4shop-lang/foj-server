@@ -99,17 +99,24 @@ bool lobby_check_countdown(Server* server)
 		return false;
 
 	uint8_t count = 0;
+	uint8_t total = 0;
 	for (size_t i = 0; i < server->peers.capacity; i++)
 	{
 		PeerData* peer = (PeerData*)server->peers.ptr[i];
 		if (!peer)
 			continue;
 
+		// .afk peers are not counted as players: the countdown only cares
+		// about regular players being ready
+		if (peer->afk)
+			continue;
+
+		total++;
 		if (peer->ready)
 			count++;
 	}
 
-	if (count == server->peers.noitems && server->peers.noitems > 1)
+	if (count == total && total > 1)
 	{
 		server->lobby.countdown = TICKSPERSEC;
 		server->lobby.countdown_sec = LOBBY_COUNTDOWN;
@@ -274,6 +281,12 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 			if (!v->server->lobby.vote.ongoing)
 				break;
 
+			if (v->afk)
+			{
+				server_send_msg(v->server, v->peer, CLRCODE_RED "you're afk - your vote doesn't count.");
+				break;
+			}
+
 			if (!v->can_vote)
 			{
 				server_send_msg(v->server, v->peer, CLRCODE_RED "у вас нет прав.");
@@ -369,6 +382,12 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		{
 			if (v->server->lobby.vote.ongoing)
 			{
+				if (v->afk)
+				{
+					server_send_msg(v->server, v->peer, CLRCODE_RED "you're afk - your vote doesn't count.");
+					break;
+				}
+
 				if (!v->can_vote)
 				{
 					server_send_msg(v->server, v->peer, CLRCODE_RED "у вас нет прав.");
@@ -494,6 +513,12 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 
 		if (v->server->lobby.vote.ongoing)
 		{
+			if (v->afk)
+			{
+				server_send_msg(v->server, v->peer, CLRCODE_RED "you're afk - your vote doesn't count.");
+				break;
+			}
+
 			if (!v->can_vote)
 			{
 				server_send_msg(v->server, v->peer, CLRCODE_RED "ты не можешь подписать петицию.");
@@ -613,6 +638,10 @@ bool lobby_state_tick(Server* server)
 
 			if (peer->vote_cooldown > 0)
 				peer->vote_cooldown -= server->delta;
+
+			// .afk peers are never kicked for idling in the lobby
+			if (peer->afk)
+				continue;
 
 			if (!peer->ready)
 			{
