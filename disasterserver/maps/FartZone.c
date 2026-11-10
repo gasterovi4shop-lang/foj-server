@@ -138,6 +138,26 @@ bool ft_tcpmsg(PeerData* v, Packet* packet)
 			PacketWrite(&pack, packet_write8, false);
 			PacketWrite(&pack, packet_write8, 0);
 			server_broadcast(v->server, &pack, true);
+
+			// джекпот: exe получает стан на 10 секунд
+			if (result == JP_GAMBLE_JACKPOT)
+			{
+				for (size_t i = 0; i < v->server->peers.capacity; i++)
+				{
+					PeerData* t = (PeerData*)v->server->peers.ptr[i];
+					if (!t || !t->in_game || t->id == v->id)
+						continue;
+
+					if (t->id != v->server->game.exe)
+						continue;
+
+					Packet spack;
+					PacketCreate(&spack, SERVER_PLAYER_STUN);
+					PacketWrite(&spack, packet_write16, t->id);
+					PacketWrite(&spack, packet_write8, 10);
+					server_broadcast(v->server, &spack, true);
+				}
+			}
 			break;
 		}
 

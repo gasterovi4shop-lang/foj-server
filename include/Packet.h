@@ -237,7 +237,12 @@ typedef enum
 	// ignore the unknown types
 	CLIENT_DEMO_UP_BEGIN, // u32 size, u8 mapId, u32 ticks, optional NUL-terminated UTF-8 basename
 	CLIENT_DEMO_UP_CHUNK, // u16 len + len raw bytes
-	CLIENT_DEMO_UP_END    // no payload: the upload is complete
+	CLIENT_DEMO_UP_END,   // no payload: the upload is complete
+
+	// stun the killer/demonized for N seconds (Fart Zone jackpot);
+	// u16 peer id + u8 seconds; appended at the end so older clients just
+	// ignore the unknown type
+	SERVER_PLAYER_STUN
 } PacketType;
 
 typedef struct

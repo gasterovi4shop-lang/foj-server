@@ -1171,7 +1171,8 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 				break;
 
 			rec->plr.stats.stun_time += sec;
-			damager->plr.stats.stuns++;
+			if (rec != damager)
+				damager->plr.stats.stuns++;
 			break;
 		}
 

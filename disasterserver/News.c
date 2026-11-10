@@ -28,8 +28,8 @@
 //           "END\n"
 //   anything else: "ERR\n"
 
-#define NEWS_MAX_ITEMS	32
-#define NEWS_MAX_TEXT	2048
+#define NEWS_MAX_ITEMS	64
+#define NEWS_MAX_TEXT	6144
 
 static cJSON*	g_news = NULL;
 static Mutex	g_newsMut;
@@ -123,7 +123,7 @@ static void news_client_thread(void* arg)
 			// весь ответ собирается в один буфер и уходит ОДНИМ send():
 			// GameMaker стабильно обрабатывает один data-event на пакет,
 			// а россыпь мелких send-ов по реальной сети терялась
-			size_t cap = 160 + (size_t)count * 2200;
+			size_t cap = 160 + (size_t)count * 6400;
 			char* resp = (char*)malloc(cap);
 
 			if (!resp)
@@ -258,9 +258,16 @@ static void news_listen_thread(void* arg)
 		if (client < 0)
 			continue;
 
-		// one throwaway thread per client: news clients are short-lived
+		// one throwaway thread per client: news clients are short-lived.
+		// Windows: handle MUST be closed right away - it leaks otherwise,
+		// and after enough news connections CreateThread starts failing
+		// (clients hang with no response)
 		Thread th;
 		ThreadSpawn(th, news_client_thread, (void*)(intptr_t)client);
+#ifdef _WIN32
+		if (th)
+			CloseHandle(th);
+#endif
 	}
 }
 
