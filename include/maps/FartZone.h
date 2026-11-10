@@ -3,6 +3,7 @@
 #include "../Maps.h"
 
 bool ft_init(Server* server);
+bool ft_tick(Server* server);
 bool ft_tcpmsg(PeerData* v, Packet* packet);
 
 #endif

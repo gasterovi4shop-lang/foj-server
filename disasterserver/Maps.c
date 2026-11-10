@@ -48,7 +48,7 @@ Map g_mapList[MAP_COUNT+1] =
 	{ CLRCODE_RED "Mystic Wood",		{ wd_init,  map_tick, map_tcpmsg, map_left }, 1, 26 }, //18
 	{ CLRCODE_GRN "Echidna Ruins",		{ mj_init,  map_tick, map_tcpmsg, map_left }, 1, 28+5 }, //19
 	{ CLRCODE_ORG "Joker's Palace",		{ jp_init,  jp_tick,  jp_tcpmsg,  map_left }, 1, 27 }, //20
-	{ CLRCODE_BLU "Fart Zone",			{ ft_init,	map_tick, ft_tcpmsg,  map_left }, 1, 15 }, //21
+	{ CLRCODE_BLU "Fart Zone",			{ ft_init,	ft_tick,   ft_tcpmsg,  map_left }, 1, 15 }, //21
 };
 
 bool map_init(Server* server)

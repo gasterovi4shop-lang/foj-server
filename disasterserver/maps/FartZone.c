@@ -66,6 +66,7 @@ bool ft_init(Server* server)
 {
 	RAssert(map_time(server, 4.27 * TICKSPERSEC, 20));
 	RAssert(map_ring(server, 1));
+	server->game.ft_jackpot_stun_timer = 0;
 
 	for (uint8_t i = 0; i < 3; i++)
 		RAssert(game_spawn(server, (Entity*)&(MakeBlackRing(MAP_BRING, MAP_BRING)), sizeof(BRing), NULL));
@@ -73,6 +74,49 @@ bool ft_init(Server* server)
 	RAssert(game_spawn(server, (Entity*)&(MakeDummy()), sizeof(Dummy), NULL));
 	RAssert(game_spawn(server, (Entity*)&(MakeSpike()), sizeof(SpikeController), NULL));
 	RAssert(game_spawn(server, (Entity*)&(MakeDTBall()), sizeof(DTBall), NULL));
+
+	return true;
+}
+
+bool ft_tick(Server* server)
+{
+	//общая логика больших колец, как у карт без собственного тика
+	RAssert(map_tick(server));
+
+	//отложенный стан exe от джекпота: применяется одновременно со звуком
+	if (server->game.ft_jackpot_stun_timer > 0 && --server->game.ft_jackpot_stun_timer == 0)
+	{
+		if (server->game.end > 0)
+			return true;
+
+		PeerData* exe = NULL;
+		for (size_t i = 0; i < server->peers.capacity; i++)
+		{
+			PeerData* t = (PeerData*)server->peers.ptr[i];
+			if (!t || !t->in_game || t->id != server->game.exe)
+				continue;
+
+			exe = t;
+			break;
+		}
+
+		if (exe == NULL)
+			return true;
+
+		Packet pack;
+		PacketCreate(&pack, SERVER_PLAYER_STUN);
+		PacketWrite(&pack, packet_write16, exe->id);
+		PacketWrite(&pack, packet_write8, 5);
+		server_broadcast(server, &pack, true);
+
+		//статистика стана пишется сервером - как в CLIENT_STATS_REPORT type 1
+		//(Game.c): stun_time оглушённому, stuns крутнувшему
+		exe->plr.stats.stun_time += 5;
+
+		PeerData* roller = server_find_peer(server, server->game.ft_jackpot_stun_roller);
+		if (roller != NULL && roller != exe)
+			roller->plr.stats.stuns++;
+	}
 
 	return true;
 }
@@ -139,24 +183,13 @@ bool ft_tcpmsg(PeerData* v, Packet* packet)
 			PacketWrite(&pack, packet_write8, 0);
 			server_broadcast(v->server, &pack, true);
 
-			// джекпот: exe получает стан на 10 секунд
+			//джекпот: exe получает стан. Он откладывается на 72 тика, чтобы
+			//применяться одновременно со звуком джекпота - клиенты играют его
+			//в конце прокрутки (apply_roll), а не в момент выдачи результата
 			if (result == JP_GAMBLE_JACKPOT)
 			{
-				for (size_t i = 0; i < v->server->peers.capacity; i++)
-				{
-					PeerData* t = (PeerData*)v->server->peers.ptr[i];
-					if (!t || !t->in_game || t->id == v->id)
-						continue;
-
-					if (t->id != v->server->game.exe)
-						continue;
-
-					Packet spack;
-					PacketCreate(&spack, SERVER_PLAYER_STUN);
-					PacketWrite(&spack, packet_write16, t->id);
-					PacketWrite(&spack, packet_write8, 10);
-					server_broadcast(v->server, &spack, true);
-				}
+				v->server->game.ft_jackpot_stun_timer = 72;
+				v->server->game.ft_jackpot_stun_roller = v->id;
 			}
 			break;
 		}

@@ -174,6 +174,8 @@ typedef struct
 	uint8_t jp_door_open_timer;
 	bool jp_gamble_opened;
 	uint16_t jp_door_ids[2];
+	uint8_t ft_jackpot_stun_timer; //Fart Zone: отложенный стан exe от джекпота
+	uint16_t ft_jackpot_stun_roller;
 
 	/* Entities */
 	uint16_t entid;
