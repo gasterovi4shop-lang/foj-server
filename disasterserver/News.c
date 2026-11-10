@@ -48,6 +48,15 @@ static bool news_unlock(void)
 	return true;
 }
 
+static void news_sleep_ms(int ms)
+{
+#ifdef _WIN32
+	Sleep(ms);
+#else
+	usleep(ms * 1000);
+#endif
+}
+
 static bool send_all(int sock, const char* data, size_t len)
 {
 	size_t sent = 0;
@@ -178,6 +187,16 @@ static void news_client_thread(void* arg)
 			Info("News: response sent (%d items, %zu bytes)", count, ro);
 		}
 		news_unlock();
+
+		//второй отложенный всплеск: GameMaker не генерирует data-event на
+		//последний сегмент всплеска, и его байты (хвост последней записи
+		//вместе с END) остаются непрочитанными в буфере сокета. Отдельный
+		//мелкий send спустя паузу будит приёмник: recv() забирает ВСЁ
+		//накопленное, включая пропущенный хвост. Пустые строки клиент
+		//игнорирует, поэтому содержимое второй порции не важно
+		news_sleep_ms(200);
+		send_all(sock, "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n"
+					   "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", 64);
 	}
 	else
 		send_all(sock, "ERR\n", 4);
