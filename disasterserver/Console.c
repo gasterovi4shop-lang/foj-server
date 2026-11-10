@@ -35,6 +35,7 @@ void console_help_text(char* out, size_t cap)
 		".whitelist on|off - whitelist mode: only listed ids can join\n"
 		".whitelist add|del <id> - edit the whitelist\n"
 		".demonize on|off - toggle survivor demonization\n"
+		".map_draft - enable map draft for the next match\n"
 		".myid - show your system account id\n"
 		".set_id <id> - set your custom id (3-18 letters, digits, _ or -)\n"
 		".reset_id [system_id] - reset your custom id; operators may specify another id\n"
@@ -311,6 +312,20 @@ static bool console_exec(Server* server, char* line)
 		return true;
 	}
 
+	if (strcmp(cmd, ".map_draft") == 0)
+	{
+		if (server->lobby.mapdraft)
+		{
+			out("map draft is already enabled");
+			return true;
+		}
+
+		server->lobby.mapdraft = true;
+		server_broadcast_msg(server, CLRCODE_GRN "map draft" CLRCODE_RST " enabled for the next match");
+		out("map draft enabled for the next match");
+		return true;
+	}
+
 	if (strcmp(cmd, ".demonize") == 0)
 	{
 		char* arg = strtok(NULL, " ");
@@ -399,8 +414,9 @@ static bool console_exec(Server* server, char* line)
 			return true;
 		}
 
-		results_init(server);
-		out("returning to the lobby");
+		// мгновенный возврат: без экрана результатов
+		RAssert(game_uninit(server, false));
+		out("returned to the lobby");
 		return true;
 	}
 

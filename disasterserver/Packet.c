@@ -45,7 +45,7 @@ void packet_truncate_chatmsg(Packet* packet, size_t maxchars)
 	}
 
 	packet->buff[end] = '\0';
-	packet->len = (uint8_t)(end + 1);
+	packet->len = (uint16_t)(end + 1);
 }
 
 size_t string_length(String* str)
@@ -153,8 +153,8 @@ bool packet_new(Packet* packet, PacketType type)
 
 Packet packet_from(ENetPacket* packet)
 {
-	Packet pack = (Packet) { .pos = 0,  .len = (uint8_t)packet->dataLength };
-	memcpy(pack.buff, packet->data, (uint8_t)packet->dataLength);
+	Packet pack = (Packet) { .pos = 0,  .len = (uint16_t)(packet->dataLength > PACKET_MAXSIZE ? PACKET_MAXSIZE : packet->dataLength) };
+	memcpy(pack.buff, packet->data, pack.len);
 	enet_packet_destroy(packet);
 	return pack;
 }

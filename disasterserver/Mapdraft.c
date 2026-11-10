@@ -5,7 +5,6 @@
 #include <Config.h>
 #include <CMath.h>
 #include <Colors.h>
-#include <ctype.h>
 #include <time.h>
 
 // seconds a player has to ban a map before a random one is banned
@@ -21,8 +20,56 @@ static PeerData* mapdraft_turn_peer(Server* server)
 	return server_find_peer(server, lobby->draft_order[lobby->draft_turn]);
 }
 
-// announce the current turn player and restart the pick timer;
-// skips over players who have left, returns false if nobody is left
+// a map counts as banned once it is out of the remaining pool (this also
+// covers the maps disabled in the server panel: they never enter the pool)
+static bool mapdraft_is_banned(Server* server, uint8_t map)
+{
+	for (uint8_t i = 0; i < server->lobby.draft_pool_count; i++)
+	{
+		if (server->lobby.draft_pool[i] == map)
+			return false;
+	}
+
+	return true;
+}
+
+static uint8_t mapdraft_first_free(Server* server)
+{
+	for (uint8_t i = 0; i < MAP_COUNT; i++)
+	{
+		if (!mapdraft_is_banned(server, i))
+			return i;
+	}
+
+	return 0;
+}
+
+// full grid snapshot: banned bitfield + whose turn it is + their cursor
+static bool mapdraft_broadcast_state(Server* server)
+{
+	Lobby* lobby = &server->lobby;
+	PeerData* turn = mapdraft_turn_peer(server);
+
+	Packet pack;
+	PacketCreate(&pack, SERVER_DRAFT_STATE);
+	for (uint8_t b = 0; b < (MAP_COUNT + 7) / 8; b++)
+	{
+		uint8_t bits = 0;
+		for (uint8_t i = b * 8; i < b * 8 + 8 && i < MAP_COUNT; i++)
+		{
+			if (mapdraft_is_banned(server, i))
+				bits |= 1 << (i - b * 8);
+		}
+		PacketWrite(&pack, packet_write8, bits);
+	}
+	PacketWrite(&pack, packet_write16, turn ? turn->id : 0);
+	PacketWrite(&pack, packet_write8, lobby->draft_selected);
+	server_broadcast(server, &pack, true);
+	return true;
+}
+
+// hand the turn to the draft_turn player (or the next one still here):
+// fresh 15s timer, cursor parked on the first free map
 static bool mapdraft_announce_turn(Server* server)
 {
 	Lobby* lobby = &server->lobby;
@@ -37,13 +84,21 @@ static bool mapdraft_announce_turn(Server* server)
 			continue;
 
 		lobby->draft_turn = idx;
-
-		char buffer[320];
-		snprintf(buffer, 320, "%s ~is " CLRCODE_GRN "choosing" CLRCODE_RST " map for " CLRCODE_RED "ban", peer->nickname.value);
-		server_broadcast_msg(server, buffer);
-
+		lobby->draft_selected = mapdraft_first_free(server);
 		lobby->draft_timer = TICKSPERSEC;
 		lobby->draft_timer_sec = DRAFT_PICK_TIME;
+
+		RAssert(mapdraft_broadcast_state(server));
+
+		// turn status line under the grid: whose pick it is now
+		char buffer[160];
+		snprintf(buffer, 160, "%s ~is " CLRCODE_GRN "choosing" CLRCODE_RST " a map to " CLRCODE_RED "ban", peer->nickname.value);
+
+		Packet ev;
+		PacketCreate(&ev, SERVER_DRAFT_EVENT);
+		PacketWrite(&ev, packet_write8, 1);
+		PacketWrite(&ev, packet_writestr, string_new(buffer));
+		server_broadcast(server, &ev, true);
 
 		Packet pack;
 		PacketCreate(&pack, SERVER_DRAFT_TIME);
@@ -55,33 +110,11 @@ static bool mapdraft_announce_turn(Server* server)
 	return false;
 }
 
-// the draft is over: the last remaining map wins. The event simply ends in
-// place - the players never left the lobby room, so nothing is recreated;
-// the usual ready -> 3-2-1 countdown follows and skips the 3 map vote
+// the draft is over: the last remaining map wins and the match continues
+// right in character select, exactly like the regular map vote does
 static bool mapdraft_finish(Server* server, uint8_t map)
 {
 	server->last_map = map;
-	server->lobby.mapdraft_map = map;
-
-	// plain lobby state again, match countdown armed from scratch
-	server->state = ST_LOBBY;
-	server->lobby.countdown = TICKSPERSEC;
-	server->lobby.countdown_sec = LOBBY_NO_COUNTDOWN;
-	server->lobby.vote.ongoing = 0;
-
-	// the AFK window restarts: the draft itself took long enough
-	for (size_t i = 0; i < server->peers.capacity; i++)
-	{
-		PeerData* peer = (PeerData*)server->peers.ptr[i];
-		if (peer)
-			peer->timeout = 0;
-	}
-
-	// hide the pick timer on the clients (0 = hide)
-	Packet pack;
-	PacketCreate(&pack, SERVER_DRAFT_TIME);
-	PacketWrite(&pack, packet_write8, 0);
-	server_broadcast(server, &pack, true);
 
 	char buffer[128];
 	snprintf(buffer, 128, "next " CLRCODE_GRN "map" CLRCODE_RST " is %s", g_mapList[map].name);
@@ -89,17 +122,28 @@ static bool mapdraft_finish(Server* server, uint8_t map)
 
 	Info(LOG_YLW "Map draft picked [" LOG_BLU "%s" LOG_RST "]", g_mapList[map].name);
 
-	// everyone stayed ready from before the draft: start the 3-2-1 countdown
-	// right away; if somebody unreadied, it starts once they ready up again
-	RAssert(lobby_check_countdown(server));
-
-	return true;
+	return charselect_init(map, server) || lobby_init(server);
 }
 
-// remove a map from the pool and pass the turn (or finish the draft)
-static bool mapdraft_ban_map(Server* server, uint8_t map)
+// remove a map from the pool and pass the turn (or finish the draft);
+// timed_out: the pick expired and the map was banned randomly
+static bool mapdraft_ban_map(Server* server, uint8_t map, bool timed_out)
 {
 	Lobby* lobby = &server->lobby;
+	PeerData* turn = mapdraft_turn_peer(server);
+
+	// event line under the grid: who banned what / who skipped the turn
+	char buffer[160];
+	if (timed_out)
+		snprintf(buffer, 160, "%s " CLRCODE_RED "skipped the turn" CLRCODE_RST " - %s " CLRCODE_RED "was banned", turn ? turn->nickname.value : "?", g_mapList[map].name);
+	else
+		snprintf(buffer, 160, "%s " CLRCODE_RED "banned" CLRCODE_RST " %s", turn ? turn->nickname.value : "?", g_mapList[map].name);
+
+	Packet ev;
+	PacketCreate(&ev, SERVER_DRAFT_EVENT);
+	PacketWrite(&ev, packet_write8, 0);
+	PacketWrite(&ev, packet_writestr, string_new(buffer));
+	server_broadcast(server, &ev, true);
 
 	for (uint8_t i = 0; i < lobby->draft_pool_count; i++)
 	{
@@ -178,20 +222,21 @@ bool mapdraft_init(Server* server)
 	if (server->lobby.draft_pool_count == 0)
 		return mapvote_init(server);
 
+	Info(LOG_YLW "Server is now in " LOG_PUR "Map Draft (pool %d, players %d)", server->lobby.draft_pool_count, server->lobby.draft_order_count);
+
+	// a single map left means there is nothing to ban: skip the grid entirely
+	if (server->lobby.draft_pool_count == 1)
+		return mapdraft_finish(server, server->lobby.draft_pool[0]);
+
 	server->state = ST_MAPDRAFT;
 	server->lobby.draft_timer = TICKSPERSEC;
 	server->lobby.draft_timer_sec = DRAFT_PICK_TIME;
 	server->lobby.draft_turn = 0;
 
-	server_broadcast_msg(server, "-----------------------");
-	server_broadcast_msg(server, CLRCODE_GRN "map draft" CLRCODE_RST " ban maps with .b 1-21 or .b map name");
-	server_broadcast_msg(server, "-----------------------");
-
-	Info(LOG_YLW "Server is now in " LOG_PUR "Map Draft (pool %d, players %d)", server->lobby.draft_pool_count, server->lobby.draft_order_count);
-
-	// a single map left means there is nothing to ban
-	if (server->lobby.draft_pool_count == 1)
-		return mapdraft_finish(server, server->lobby.draft_pool[0]);
+	// open the vote grid on the clients, then sync the initial state
+	Packet pack;
+	PacketCreate(&pack, SERVER_DRAFT_START);
+	server_broadcast(server, &pack, true);
 
 	RAssert(mapdraft_announce_turn(server));
 	return true;
@@ -206,6 +251,41 @@ bool mapdraft_state_handle(PeerData* v, Packet* packet)
 	Packet pack;
 	switch (type)
 	{
+	case CLIENT_DRAFT_SELECT:
+	{
+		if (!v->in_game)
+			break;
+
+		PacketRead(slot, packet, packet_read8, uint8_t);
+
+		PeerData* turn = mapdraft_turn_peer(v->server);
+		if (!turn || turn->id != v->id || slot >= MAP_COUNT)
+			break;
+
+		v->server->lobby.draft_selected = slot;
+		RAssert(mapdraft_broadcast_state(v->server));
+		break;
+	}
+
+	case CLIENT_DRAFT_BAN:
+	{
+		if (!v->in_game)
+			break;
+
+		PacketRead(slot, packet, packet_read8, uint8_t);
+
+		Server* server = v->server;
+		PeerData* turn = mapdraft_turn_peer(server);
+		if (!turn || turn->id != v->id || slot >= MAP_COUNT)
+			break;
+
+		// already banned (or disabled in the panel) - ignore
+		if (mapdraft_is_banned(server, slot))
+			break;
+
+		return mapdraft_ban_map(server, slot, false);
+	}
+
 	case CLIENT_CHAT_MESSAGE:
 	{
 		PacketRead(pid, packet, packet_read16, uint16_t);
@@ -255,19 +335,10 @@ bool mapdraft_state_tick(Server* server)
 			// out of time - a random map from the remaining pool is banned
 			Lobby* lobby = &server->lobby;
 			uint8_t map = lobby->draft_pool[rand() % lobby->draft_pool_count];
-			PeerData* turn = mapdraft_turn_peer(server);
 
-			char buffer[320];
-			if (turn)
-			{
-				snprintf(buffer, 320, "%s " CLRCODE_RED "timed out" CLRCODE_RST, turn->nickname.value);
-				server_broadcast_msg(server, buffer);
-			}
+			Info(LOG_YLW "Map draft: pick timed out, [" LOG_BLU "%s" LOG_RST "] banned randomly", g_mapList[map].name);
 
-			snprintf(buffer, 320, "%s " CLRCODE_RED "was banned" CLRCODE_RST, g_mapList[map].name);
-			server_broadcast_msg(server, buffer);
-
-			return mapdraft_ban_map(server, map);
+			return mapdraft_ban_map(server, map, true);
 		}
 
 		Packet pack;
@@ -321,130 +392,7 @@ bool mapdraft_state_left(PeerData* v)
 		}
 	}
 
-	return true;
-}
-
-// ".b <1-21>" or ".b <map name>": ban a map while the draft is running;
-// outside ST_MAPDRAFT this returns false so the message stays regular chat
-bool mapdraft_cmd_ban(PeerData* v, String* msg)
-{
-	Server* server = v->server;
-	if (server->state != ST_MAPDRAFT)
-		return false;
-
-	Lobby* lobby = &server->lobby;
-
-	if (lobby->draft_order_count == 0)
-		return true;
-
-	PeerData* turn = mapdraft_turn_peer(server);
-	if (!turn || turn->id != v->id)
-	{
-		RAssert(server_send_msg(server, v->peer, CLRCODE_RED "not allowed." CLRCODE_RST " it's not your turn"));
-		return true;
-	}
-
-	// argument: whatever follows the command token
-	long num = -1;
-	char name[64] = { 0 };
-	bool isnum = sscanf(msg->value, "%*s %ld", &num) == 1;
-	if (!isnum && sscanf(msg->value, "%*s %63[^\n]", name) != 1)
-	{
-		RAssert(server_send_msg(server, v->peer, CLRCODE_RED "usage:" CLRCODE_RST " .b 1-21 or .b map name"));
-		return true;
-	}
-
-	// trim trailing whitespace from the name
-	for (char* p = name + strlen(name); p > name && isspace((unsigned char)p[-1]); p--)
-		p[-1] = '\0';
-
-	if (!isnum && name[0] == '\0')
-	{
-		RAssert(server_send_msg(server, v->peer, CLRCODE_RED "usage:" CLRCODE_RST " .b 1-21 or .b map name"));
-		return true;
-	}
-
-	uint8_t map;
-	if (isnum)
-	{
-		if (num < 1 || num > MAP_COUNT)
-		{
-			char err[100];
-			snprintf(err, 100, CLRCODE_RED "map number should be 1 to %d", MAP_COUNT);
-			RAssert(server_send_msg(server, v->peer, err));
-			return true;
-		}
-
-		map = (uint8_t)(num - 1);
-	}
-	else
-	{
-		// map names carry a color code prefix, so match lowercase against
-		// the lowercased full name: exact text is the suffix of it
-		for (char* p = name; *p != '\0'; p++)
-			*p = (char)tolower((unsigned char)*p);
-
-		size_t len = strlen(name);
-		bool found = false;
-
-		for (uint8_t i = 0; i < MAP_COUNT && !found; i++)
-		{
-			char hay[64];
-			snprintf(hay, sizeof(hay), "%s", g_mapList[i].name);
-			for (char* p = hay; *p != '\0'; p++)
-				*p = (char)tolower((unsigned char)*p);
-
-			size_t haylen = strlen(hay);
-			if (haylen >= len && strcmp(hay + haylen - len, name) == 0)
-			{
-				map = i;
-				found = true;
-			}
-		}
-
-		// no exact name - accept a single substring match (".b volcano")
-		if (!found)
-		{
-			for (uint8_t i = 0; i < MAP_COUNT; i++)
-			{
-				char hay[64];
-				snprintf(hay, sizeof(hay), "%s", g_mapList[i].name);
-				for (char* p = hay; *p != '\0'; p++)
-					*p = (char)tolower((unsigned char)*p);
-
-				if (!strstr(hay, name))
-					continue;
-
-				if (found)
-				{
-					RAssert(server_send_msg(server, v->peer, CLRCODE_RED "ambiguous map name" CLRCODE_RST " - be more specific"));
-					return true;
-				}
-
-				map = i;
-				found = true;
-			}
-		}
-
-		if (!found)
-		{
-			RAssert(server_send_msg(server, v->peer, CLRCODE_RED "map not found" CLRCODE_RST " - .b 1-21 or .b map name"));
-			return true;
-		}
-	}
-
-	for (uint8_t i = 0; i < lobby->draft_pool_count; i++)
-	{
-		if (lobby->draft_pool[i] == map)
-		{
-			char buffer[320];
-			snprintf(buffer, 320, "%s " CLRCODE_RED "banned" CLRCODE_RST " %s", v->nickname.value, g_mapList[map].name);
-			server_broadcast_msg(server, buffer);
-
-			return mapdraft_ban_map(server, map);
-		}
-	}
-
-	RAssert(server_send_msg(server, v->peer, CLRCODE_RED "already banned" CLRCODE_RST));
+	// the turn order shifted - resync the grid
+	RAssert(mapdraft_broadcast_state(server));
 	return true;
 }

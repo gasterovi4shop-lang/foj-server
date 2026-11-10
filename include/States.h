@@ -47,7 +47,6 @@ typedef struct Entity
 #define CMD_RETURN 1236067038
 #define CMD_MYID 45848821
 #define CMD_MAPDRAFT 791961744
-#define CMD_B 1524
 #define CMD_AFK 1466872
 
 bool lobby_init				(Server* server);
@@ -69,8 +68,6 @@ bool mapdraft_state_join	(PeerData* v);
 bool mapdraft_state_left	(PeerData* v);
 bool mapdraft_state_handle	(PeerData* v, Packet* packet);
 bool mapdraft_state_tick	(Server* server);
-// .b handler: bans a map during ST_MAPDRAFT; returns false outside the draft
-bool mapdraft_cmd_ban		(PeerData* v, String* msg);
 
 bool charselect_init			(int8_t map, Server* server);
 bool charselect_state_join		(PeerData* v);
@@ -88,8 +85,11 @@ int		game_find				(Server* server, Entity** out, char* tag, size_t count);
 bool	game_bigring			(Server* server, BigRingState state);
 bool	game_state_join			(PeerData* v);
 bool	game_state_left			(PeerData* v);
+bool	demo_upload_handle		(PeerData* v, uint8_t type, Packet* packet);
 bool	game_state_handletcp	(PeerData* v, Packet* packet);
 bool	game_state_tick			(Server* server);
+bool	game_state_check		(Server* server);
+bool	game_demonize			(Server* server, PeerData* data);
 
 bool	results_init			(Server* server);
 bool	results_state_tick		(Server* server);

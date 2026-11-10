@@ -193,6 +193,10 @@ static cJSON* handle_players(int srv_index)
 
 	status_lock(server);
 	{
+		// Match data (in_game/chars/flags) survives the match in the peer struct
+		// until the next one starts - show it only while it is actually valid
+		bool match_phase = (server->state == ST_GAME || server->state == ST_RESULTS);
+
 		for (size_t p = 0; p < server->peers.capacity; p++)
 		{
 			PeerData* peer = (PeerData*)server->peers.ptr[p];
@@ -208,9 +212,19 @@ static cJSON* handle_players(int srv_index)
 					? peer->custom_id : "");
 			cJSON_AddStringToObject(item, "udid", peer->udid.value);
 			cJSON_AddStringToObject(item, "ip", peer->ip.value);
-			cJSON_AddBoolToObject(item, "in_game", peer->in_game);
+			cJSON_AddBoolToObject(item, "in_game", peer->in_game && match_phase);
 			cJSON_AddBoolToObject(item, "spectating", peer->spectating);
 			cJSON_AddBoolToObject(item, "op", peer->op);
+
+			// персонаж актуален в чарселекте/матче/результатах
+			bool chars_valid = (server->state == ST_CHARSELECT || match_phase);
+			cJSON_AddNumberToObject(item, "surv_char", chars_valid ? peer->surv_char : -1);
+			cJSON_AddNumberToObject(item, "exe_char", chars_valid ? peer->exe_char : -1);
+
+			// флаги смерти/демонизации актуальны только в матче и результатах
+			cJSON_AddBoolToObject(item, "dead", match_phase && (peer->plr.flags & PLAYER_DEAD) != 0);
+			cJSON_AddBoolToObject(item, "demonized", match_phase && (peer->plr.flags & PLAYER_DEMONIZED) != 0);
+			cJSON_AddBoolToObject(item, "escaped", match_phase && (peer->plr.flags & PLAYER_ESCAPED) != 0);
 			cJSON_AddItemToArray(arr, item);
 		}
 	}
@@ -878,6 +892,155 @@ static cJSON* handle_demonize(const cJSON* req)
 	return resp;
 }
 
+// admin action on an online player: kill or forced demonize
+static bool admin_send_all(int sock, const char* data, size_t len);
+
+static cJSON* handle_demos_list(void)
+{
+	cJSON* resp = cJSON_CreateObject();
+	cJSON* arr = cJSON_AddArrayToObject(resp, "demos");
+
+	cJSON* d = demos_get();
+	MutexLock(g_demoMut);
+	{
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, d)
+		{
+			cJSON* nm = cJSON_GetObjectItemCaseSensitive(item, "name");
+			cJSON* sz = cJSON_GetObjectItemCaseSensitive(item, "size");
+			cJSON* tm = cJSON_GetObjectItemCaseSensitive(item, "time");
+
+			cJSON* row = cJSON_CreateObject();
+			cJSON_AddStringToObject(row, "name", cJSON_IsString(nm) ? cJSON_GetStringValue(nm) : "?");
+			cJSON_AddNumberToObject(row, "size", cJSON_IsNumber(sz) ? cJSON_GetNumberValue(sz) : 0);
+			cJSON_AddNumberToObject(row, "time", cJSON_IsNumber(tm) ? cJSON_GetNumberValue(tm) : 0);
+			cJSON_AddItemToArray(arr, row);
+		}
+	}
+	MutexUnlock(g_demoMut);
+
+	cJSON_AddBoolToObject(resp, "ok", true);
+	return resp;
+}
+
+// ���������� ������ �����: ����� ����� (8-�������� little-endian ������ +
+// ����� �����) ������ json - srv_query ���� ����� ������ �� 64 ��;
+// json-�����, ������� ��������� ������� ����� �����, ��� �� ������
+static cJSON* handle_demos_del(const cJSON* req)
+{
+	cJSON* resp = cJSON_CreateObject();
+	cJSON* jname = cJSON_GetObjectItemCaseSensitive(req, "name");
+	const char* name = cJSON_IsString(jname) ? cJSON_GetStringValue(jname) : NULL;
+
+	if (!name || demos_del(name) == false)
+	{
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "demo not found");
+		return resp;
+	}
+
+	Info("Demo deleted: %s", name);
+	cJSON_AddBoolToObject(resp, "ok", true);
+	return resp;
+}
+
+static cJSON* handle_demos_get(const cJSON* req, int sock, bool* transfer_failed)
+{
+	cJSON* resp = cJSON_CreateObject();
+	cJSON* jname = cJSON_GetObjectItemCaseSensitive(req, "name");
+	const char* name = cJSON_IsString(jname) ? cJSON_GetStringValue(jname) : NULL;
+
+	if (!name || name[0] == '\0' || strchr(name, '/') || strchr(name, '\\') ||
+		strstr(name, "..") || !demos_find(name))
+	{
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "demo not found");
+		return resp;
+	}
+
+	char path[sizeof("demos/") + DEMO_FILENAME_MAX];
+	snprintf(path, sizeof(path), "demos/%s", name);
+	FILE* fp = fopen(path, "rb");
+	if (!fp)
+	{
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "demo file missing");
+		return resp;
+	}
+
+	if (fseek(fp, 0, SEEK_END) != 0)
+	{
+		fclose(fp);
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "demo seek failed");
+		return resp;
+	}
+	long size = ftell(fp);
+	if (size < 0 || size > 64 * 1024 * 1024 || fseek(fp, 0, SEEK_SET) != 0)
+	{
+		fclose(fp);
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "demo size invalid");
+		return resp;
+	}
+
+	uint8_t* buf = (uint8_t*)malloc(size > 0 ? (size_t)size : 1);
+	if (!buf || fread(buf, 1, size, fp) != (size_t)size)
+	{
+		fclose(fp);
+		free(buf);
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "demo read failed");
+		return resp;
+	}
+	fclose(fp);
+
+	uint64_t file_size = (uint64_t)size;
+	uint8_t hdr[8];
+	for (int i = 0; i < 8; i++)
+		hdr[i] = (uint8_t)((file_size >> (8 * i)) & 0xFF);
+	if (!admin_send_all(sock, (const char*)hdr, sizeof(hdr)) ||
+		!admin_send_all(sock, (const char*)buf, (size_t)size))
+	{
+		free(buf);
+		*transfer_failed = true;
+		cJSON_Delete(resp);
+		return NULL;
+	}
+	free(buf);
+
+	cJSON_AddBoolToObject(resp, "ok", true);
+	cJSON_AddBoolToObject(resp, "raw", true);
+	cJSON_AddNumberToObject(resp, "size", (double)size);
+	return resp;
+}
+
+static cJSON* handle_playeract(const cJSON* req)
+{
+	cJSON* resp = cJSON_CreateObject();
+
+	const char* action = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "action"));
+	const char* key = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(req, "key"));
+
+	if (!action || !key || !key[0] || (strcmp(action, "kill") != 0 && strcmp(action, "demonize") != 0))
+	{
+		cJSON_AddBoolToObject(resp, "ok", false);
+		cJSON_AddStringToObject(resp, "error", "missing or invalid action/key");
+		return resp;
+	}
+
+	char confirm[256];
+	bool ok = (strcmp(action, "kill") == 0)
+		? server_admin_kill(key, confirm, sizeof(confirm))
+		: server_admin_demonize(key, confirm, sizeof(confirm));
+
+	cJSON_AddBoolToObject(resp, "ok", ok);
+	cJSON_AddStringToObject(resp, "output", confirm);
+	if (!ok)
+		cJSON_AddStringToObject(resp, "error", confirm);
+	return resp;
+}
+
 static cJSON* handle_wl(const cJSON* req)
 {
 	cJSON* resp = cJSON_CreateObject();
@@ -1121,6 +1284,7 @@ static void admin_client_thread(void* arg)
 	}
 
 	cJSON* resp = NULL;
+	bool demo_transfer_failed = false;
 
 	if (admin_recv_line(sock, line, sizeof(line)))
 	{
@@ -1156,6 +1320,14 @@ static void admin_client_thread(void* arg)
 				resp = handle_ops();
 			else if (cmd && strcmp(cmd, "bans") == 0)
 				resp = handle_bans();
+			else if (cmd && strcmp(cmd, "demos_list") == 0)
+				resp = handle_demos_list();
+			else if (cmd && strcmp(cmd, "demos_get") == 0)
+				resp = handle_demos_get(req, sock, &demo_transfer_failed);
+			else if (cmd && strcmp(cmd, "demos_del") == 0)
+				resp = handle_demos_del(req);
+			else if (cmd && strcmp(cmd, "playeract") == 0)
+				resp = handle_playeract(req);
 			else if (cmd && strcmp(cmd, "wl") == 0)
 				resp = handle_wl(req);
 			else if (cmd && strcmp(cmd, "demonize") == 0)
@@ -1188,14 +1360,14 @@ static void admin_client_thread(void* arg)
 		}
 	}
 
-	if (!resp)
+	if (!resp && !demo_transfer_failed)
 	{
 		resp = cJSON_CreateObject();
 		cJSON_AddBoolToObject(resp, "ok", false);
 		cJSON_AddStringToObject(resp, "error", "bad request");
 	}
 
-	char* out = cJSON_PrintUnformatted(resp);
+	char* out = resp ? cJSON_PrintUnformatted(resp) : NULL;
 	if (out)
 	{
 		admin_send_all(sock, out, strlen(out));
@@ -1203,7 +1375,8 @@ static void admin_client_thread(void* arg)
 		free(out);
 	}
 
-	cJSON_Delete(resp);
+	if (resp)
+		cJSON_Delete(resp);
 
 	// Полу-закрытие и слив приёмного буфера - как в News.c, чтобы клиент
 	// получил ответ до RST от ядра.

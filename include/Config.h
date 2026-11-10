@@ -11,6 +11,7 @@
 #ifndef SYS_ANDROID
 	#define CONFIG_FILE "Config.json"
 	#define BANS_FILE "Bans.json"
+#define DEMOS_FILE "Demos.json"
 	#define OPERATORS_FILE "Operators.json"
 	#define OPERATOR_IDS_FILE "OperatorIds.json"
 	#define CUSTOM_IDS_FILE "CustomIds.json"
@@ -21,6 +22,7 @@
 	#define ANDROID_DIR "/data/data/com.teamexeempire.disaster2d/files/"
 	#define CONFIG_FILE ANDROID_DIR "Config.json"
 	#define BANS_FILE ANDROID_DIR "Bans.json"
+#define DEMOS_FILE ANDROID_DIR "Demos.json"
 	#define OPERATORS_FILE ANDROID_DIR "Operators.json"
 	#define OPERATOR_IDS_FILE ANDROID_DIR "OperatorIds.json"
 	#define CUSTOM_IDS_FILE ANDROID_DIR "CustomIds.json"
@@ -53,6 +55,8 @@ SERVER_API extern cJSON* g_bans;
 SERVER_API extern cJSON* g_timeouts;
 SERVER_API extern cJSON* g_ops;
 SERVER_API extern cJSON* g_opids;
+SERVER_API extern cJSON* g_demos;
+SERVER_API extern Mutex	g_demoMut;
 SERVER_API extern cJSON* g_custom_ids;
 SERVER_API extern cJSON* g_whitelist;
 SERVER_API extern Mutex	g_banMut;
@@ -72,6 +76,10 @@ typedef struct
 } BanInfo;
 
 SERVER_API bool	ban_add(const char* nickname, const char* udid, const char* ip, uint64_t expires, const char* reason);
+SERVER_API bool	ban_revoke_all(const char* key, const char* nickname, int* removed);SERVER_API bool	demos_add(const char* name, uint32_t size);
+SERVER_API bool	demos_find(const char* name);
+SERVER_API bool	demos_del(const char* name);
+SERVER_API cJSON*	demos_get(void);
 SERVER_API bool	ban_revoke(const char* udid, const char* ip);
 SERVER_API bool	ban_check(const char* udid, const char* ip, BanInfo* info);
 SERVER_API bool	ban_build_message(const BanInfo* info, char* buffer, size_t size);

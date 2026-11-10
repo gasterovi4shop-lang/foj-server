@@ -698,6 +698,25 @@ bool server_state_joined(PeerData *v)
 	PacketWrite(&pack, packet_write8, v->pet);
 	server_broadcast_ex(v->server, &pack, true, v->id);
 
+	//everyone (the joiner included) learns the newcomer's operator status
+	RAssert(server_broadcast_op(v->server, v));
+
+	//the joiner also learns everyone who is already an operator - otherwise
+	//clients that connected after the op was granted never learn about them
+	//(mid-match joiners and waiting players do not send a roster request)
+	for (size_t i = 0; i < v->server->peers.capacity; i++)
+	{
+		PeerData *peer = (PeerData *)v->server->peers.ptr[i];
+		if (!peer || !peer->op || peer->id == v->id)
+			continue;
+
+		PacketCreate(&pack, SERVER_OP_STATE);
+		PacketWrite(&pack, packet_write16, peer->id);
+		PacketWrite(&pack, packet_writestr, peer->nickname);
+		PacketWrite(&pack, packet_write8, peer->op);
+		RAssert(packet_send(v->peer, &pack, true));
+	}
+
 	switch (v->server->state)
 	{
 	case ST_LOBBY:
@@ -894,19 +913,23 @@ static PeerData* host_find_peer(Server** server, const char* low)
 {
 	PeerData* target = NULL;
 
-	mut_lock(&(*server)->state_lock);
+	// server может быть NULL (админ-поиск по всем лоббиям) - ищем сразу везде
+	if (*server)
 	{
-		for (size_t i = 0; i < (*server)->peers.capacity; i++)
+		mut_lock(&(*server)->state_lock);
 		{
-			PeerData* peer = (PeerData*)(*server)->peers.ptr[i];
-			if (peer && strcmp(peer->nickname.value, low) == 0)
+			for (size_t i = 0; i < (*server)->peers.capacity; i++)
 			{
-				target = peer;
-				break;
+				PeerData* peer = (PeerData*)(*server)->peers.ptr[i];
+				if (peer && strcmp(peer->nickname.value, low) == 0)
+				{
+					target = peer;
+					break;
+				}
 			}
 		}
+		mut_unlock(&(*server)->state_lock);
 	}
-	mut_unlock(&(*server)->state_lock);
 
 	if (target)
 		return target;
@@ -977,6 +1000,10 @@ bool server_host_ban(Server* server, const char* nick, const char* dur, const ch
 	reason = reasonfold;
 
 	uint64_t expires = forever ? 0 : (uint64_t)time(NULL) + seconds;
+	// drop the player's stale ban entries first: an older entry (e.g. an
+	// old ip permaban) would shadow the new ban on connect (ip is checked first)
+	int dropped = 0;
+	ban_revoke_all(target->accid, target->nickname.value, &dropped);
 	RAssert(ban_add(target->nickname.value, target->udid.value, target->ip.value, expires, reason));
 	// plus a ban keyed by the short account id - the primary ban key
 	RAssert(ban_add(target->nickname.value, target->accid, "", expires, reason));
@@ -1062,6 +1089,15 @@ bool server_host_ban_udid(const char* udid, const char* dur, const char* reason,
 		}
 	}
 
+	// �������-���: ������ ��������� ��������� ��� �� �����-���������,
+	// ����� ������ � �������� ������� � "unknown" � ��� �� ������������
+	if (strcmp(nick, "unknown") == 0)
+		admin_profile(udid, nick, sizeof(nick), NULL);
+
+	// drop stale entries under this id and the resolved nick (see server_host_ban):
+	// an older entry (e.g. an old ip permaban) would shadow the new ban on connect
+	int dropped = 0;
+	ban_revoke_all(udid, nick, &dropped);
 	RAssert(ban_add(nick, udid, online ? online->ip.value : "", expires, reasonfold));
 
 	if (online)
@@ -1099,11 +1135,29 @@ static PeerData* host_find_peer_by_id(Server** out_srv, const char* id)
 
 		mut_lock(&srv->state_lock);
 		{
+			char idlow[24];
+			snprintf(idlow, sizeof(idlow), "%s", id);
+			for (char* q = idlow; *q; q++)
+				*q = (char)tolower((unsigned char)*q);
+
 			for (size_t p = 0; p < srv->peers.capacity; p++)
 			{
 				PeerData* peer = (PeerData*)srv->peers.ptr[p];
-				if (peer && (strcmp(peer->accid, id) == 0 || strcmp(peer->udid.value, id) == 0 ||
-					strcmp(peer->custom_id, id) == 0))
+				if (!peer)
+					continue;
+
+				char aid[16];
+				snprintf(aid, sizeof(aid), "%s", peer->accid);
+				for (char* q = aid; *q; q++)
+					*q = (char)tolower((unsigned char)*q);
+
+				char cid[19];
+				snprintf(cid, sizeof(cid), "%s", peer->custom_id);
+				for (char* q = cid; *q; q++)
+					*q = (char)tolower((unsigned char)*q);
+
+				if (strcmp(peer->udid.value, id) == 0 || strcmp(aid, idlow) == 0 ||
+					(cid[0] && strcmp(cid, idlow) == 0))
 				{
 					target = peer;
 					*out_srv = srv;
@@ -1270,6 +1324,176 @@ bool server_force_exe_key(const char* key, char* confirm, size_t cap)
 	return true;
 }
 
+// admin: find an online player by id (accid/custom/udid) or nick, all lobbies
+static PeerData* admin_find_target(Server** out_srv, const char* key)
+{
+	Server* srv = NULL;
+	PeerData* target = host_find_peer_by_id(&srv, key);
+
+	if (!target)
+	{
+		char low[32];
+		snprintf(low, sizeof(low), "%s", key ? key : "");
+		for (char* p = low; *p != '\0'; p++)
+			*p = (char)tolower((unsigned char)*p);
+		target = host_find_peer(&srv, low);
+	}
+
+	if (target && out_srv)
+		*out_srv = srv;
+	return target;
+}
+
+// admin: force-kill a survivor - natural death with the 30s revive timer
+bool server_admin_kill(const char* key, char* confirm, size_t cap)
+{
+	Server* srv = NULL;
+	PeerData* target = admin_find_target(&srv, key);
+
+	if (!target || !srv)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "player '%s' isn't on this server" CLRCODE_RST, key);
+		return false;
+	}
+
+	if (srv->state != ST_GAME)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "the match is not running right now" CLRCODE_RST);
+		return false;
+	}
+
+	if (target->id == srv->game.exe)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "%s is the exe - can't be killed" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
+	if (!target->in_game || (target->plr.flags & (PLAYER_DEAD | PLAYER_DEMONIZED | PLAYER_ESCAPED)))
+	{
+		snprintf(confirm, cap, CLRCODE_RED "%s is already dead or demonized" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
+	// natural death flow: dead flag + 30s revive timer
+	SET_FLAG(target->plr.flags, PLAYER_DEAD);
+	target->plr.death_timer_sec = 30;
+
+	Packet pack;
+	PacketCreate(&pack, SERVER_PLAYER_DEATH_STATE);
+	PacketWrite(&pack, packet_write16, target->id);
+	PacketWrite(&pack, packet_write8, 1);
+	PacketWrite(&pack, packet_write8, 0);
+	server_broadcast(srv, &pack, true);
+
+	PacketCreate(&pack, SERVER_REVIVAL_STATUS);
+	PacketWrite(&pack, packet_write8, 0);
+	PacketWrite(&pack, packet_write16, target->id);
+	server_broadcast(srv, &pack, true);
+
+	Info("%s (id %d) was killed by admin", target->nickname.value, target->id);
+
+	// vanilla rule: a revived player dying again demonizes instantly
+	if (target->plr.flags & PLAYER_REVIVED)
+	{
+		RAssert(game_demonize(srv, target));
+	}
+	else
+	{
+		RAssert(game_state_check(srv));
+	}
+
+	snprintf(confirm, cap, CLRCODE_GRN "%s was killed" CLRCODE_RST, target->nickname.value);
+	return true;
+}
+
+// admin: force-demonize a survivor, bypassing the quota and the demonize toggle
+bool server_admin_demonize(const char* key, char* confirm, size_t cap)
+{
+	Server* srv = NULL;
+	PeerData* target = admin_find_target(&srv, key);
+
+	if (!target || !srv)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "player '%s' isn't on this server" CLRCODE_RST, key);
+		return false;
+	}
+
+	if (srv->state != ST_GAME)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "the match is not running right now" CLRCODE_RST);
+		return false;
+	}
+
+	if (target->id == srv->game.exe)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "%s is the exe" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
+	if (!target->in_game || (target->plr.flags & PLAYER_ESCAPED))
+	{
+		snprintf(confirm, cap, CLRCODE_RED "%s can't be demonized right now" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
+	if (target->plr.flags & PLAYER_DEMONIZED)
+	{
+		snprintf(confirm, cap, CLRCODE_RED "%s is already demonized" CLRCODE_RST, target->nickname.value);
+		return false;
+	}
+
+	// живой игрок: сначала "смерть" - клиент переходит в состояние трупа,
+	// только после этого понимает пакет демонизации
+	if (!(target->plr.flags & PLAYER_DEAD))
+	{
+		target->plr.death_timer_sec = 0;
+
+		Packet dpack;
+		PacketCreate(&dpack, SERVER_PLAYER_DEATH_STATE);
+		PacketWrite(&dpack, packet_write16, target->id);
+		PacketWrite(&dpack, packet_write8, 1);
+		PacketWrite(&dpack, packet_write8, 0);
+		server_broadcast(srv, &dpack, true);
+
+		PacketCreate(&dpack, SERVER_REVIVAL_STATUS);
+		PacketWrite(&dpack, packet_write8, 0);
+		PacketWrite(&dpack, packet_write16, target->id);
+		server_broadcast(srv, &dpack, true);
+	}
+
+	DEL_FLAG(target->plr.flags, PLAYER_DEAD);
+	SET_FLAG(target->plr.flags, PLAYER_DEMONIZED);
+	target->plr.stats.rings = 0;
+
+	switch (target->surv_char)
+	{
+	case CH_TAILS:
+		srv->game.cooldowns[TAILS_RECHARGE] = 0;
+		srv->game.cooldowns[ETAILS_RECHARGE] = 0;
+		break;
+
+	case CH_EGGMAN:
+		srv->game.cooldowns[EGGTRACK_RECHARGE] = 0;
+		break;
+
+	case CH_CREAM:
+		srv->game.cooldowns[CREAM_RING_SPAWN] = 0;
+		break;
+	}
+
+	Info("%s (id %d) was demonized by admin", target->nickname.value, target->id);
+
+	Packet pack;
+	PacketCreate(&pack, SERVER_GAME_DEATHTIMER_END);
+	PacketWrite(&pack, packet_write8, 1);
+	RAssert(packet_send(target->peer, &pack, true));
+
+	RAssert(game_state_check(srv));
+
+	snprintf(confirm, cap, CLRCODE_GRN "%s was demonized" CLRCODE_RST, target->nickname.value);
+	return true;
+}
+
 bool server_host_op_id(const char* id, char* confirm, size_t cap)
 {
 	if (!id || id[0] == '\0')
@@ -1292,6 +1516,7 @@ bool server_host_op_id(const char* id, char* confirm, size_t cap)
 	if (target)
 	{
 		target->op = true; // применяем сразу, не дожидаясь перезахода
+		server_broadcast_op(target->server, target);
 		Info("%s opped by account id", target->nickname.value);
 		snprintf(confirm, cap, CLRCODE_GRN "%s is now an operator" CLRCODE_RST, target->nickname.value);
 	}
@@ -1312,14 +1537,39 @@ bool server_host_unban(const char* key, char* confirm, size_t cap)
 		return false;
 	}
 
-	if (!ban_revoke(key, key))
+	// resolve the player's nick to purge every key their ban is stored
+	// under: a ban is written under udid, ip, accid and custom_id at once,
+	// so revoking only the raw key left the other entries alive
+	char nick[32] = "";
+	Server* srv = NULL;
+	PeerData* target = host_find_peer_by_id(&srv, key);
+	if (target)
+		snprintf(nick, sizeof(nick), "%s", target->nickname.value);
+	else
+	{
+		BanInfo info = { 0 };
+		ban_check(key, "", &info);
+		if (info.banned && info.nickname[0])
+			snprintf(nick, sizeof(nick), "%s", info.nickname);
+	}
+
+	int removed = 0;
+	if (!ban_revoke_all(key, nick, &removed))
 	{
 		snprintf(confirm, cap, CLRCODE_RED "no ban found for '%s'" CLRCODE_RST, key);
 		return false;
 	}
 
-	Info("%s unbanned by host", key);
-	snprintf(confirm, cap, CLRCODE_GRN "'%s' unbanned" CLRCODE_RST, key);
+	if (removed > 1)
+	{
+		Info("%s unbanned by host (%d entries)", nick[0] ? nick : key, removed);
+		snprintf(confirm, cap, CLRCODE_GRN "'%s' unbanned (%d entries)" CLRCODE_RST, nick[0] ? nick : key, removed);
+	}
+	else
+	{
+		Info("%s unbanned by host", key);
+		snprintf(confirm, cap, CLRCODE_GRN "'%s' unbanned" CLRCODE_RST, key);
+	}
 	return true;
 }
 
@@ -1380,15 +1630,6 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 	{
 	default:
 		return false;
-
-	case CMD_B:
-	{
-		// map draft ban: handled only while ST_MAPDRAFT is running,
-		// otherwise it falls through to a regular chat message
-		if (!mapdraft_cmd_ban(v, msg))
-			return false;
-		break;
-	}
 
 	case CMD_AFK:
 	{
@@ -1696,7 +1937,8 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 			break;
 		}
 
-		RAssert(results_init(v->server));
+		// мгновенный возврат: без экрана результатов
+		RAssert(game_uninit(v->server, false));
 		break;
 	}
 
@@ -1829,7 +2071,7 @@ bool server_cmd_handle(Server *server, unsigned long hash, PeerData *v, String *
 		RAssert(server_send_msg(v->server, v->peer, lobby_msg));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vk" CLRCODE_RST " vote kick"));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".vp" CLRCODE_RST " vote practice mode"));
-		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".map_draft" CLRCODE_RST " vote map draft (ban maps with .b)"));
+		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".map_draft" CLRCODE_RST " vote map draft (ban maps on the grid)"));
 		RAssert(server_send_msg(v->server, v->peer, CLRCODE_GRA ".afk" CLRCODE_RST " toggle afk mode (not kicked, not counted, spectates"));
 
 		if (v->op)
@@ -1963,6 +2205,7 @@ bool server_msg_handle(Server *server, PacketType type, PeerData *v, Packet *pac
 			{
 				peer->op = true;
 
+				server_broadcast_op(v->server, peer);
 				RAssert(op_add(peer->nickname.value, peer->ip.value));
 				server_send_msg(v->server, peer->peer, CLRCODE_GRN "you're an operator now");
 				break;
@@ -2019,4 +2262,20 @@ bool server_broadcast_msg(Server *server, const char *message)
 
 	server_broadcast(server, &pack, true);
 	return true;
+}
+
+// tells every client this peer has operator rights; the client caches it by
+// nickname and shimmers op nicknames in the lobby, the tab list and the
+// results screen
+bool server_broadcast_op(Server *server, PeerData *v)
+{
+	if (!server || !v)
+		return true;
+
+	Packet pack;
+	PacketCreate(&pack, SERVER_OP_STATE);
+	PacketWrite(&pack, packet_write16, v->id);
+	PacketWrite(&pack, packet_writestr, v->nickname);
+	PacketWrite(&pack, packet_write8, v->op);
+	return server_broadcast(server, &pack, true);
 }

@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define TICKSPERSEC 60
-#define BUILD_VERSION 1112
+#define BUILD_VERSION 1997
 
 #define STR_HELPER(x) #x
 #define STRINGIFY(x) STR_HELPER(x)
@@ -90,6 +90,14 @@ typedef struct PeerData
 	double timeout;
 	double vote_cooldown;
 
+	// demo upload state: the match recording streamed to demos/ in chunks;
+	// freed on completion/error/disconnect
+	bool demo_up;
+	char demo_name[DEMO_FILENAME_MAX + 1];
+	uint32_t demo_size;
+	uint32_t demo_got;
+	uint8_t *demo_buf;
+
 	struct Server *server;
 } PeerData;
 
@@ -114,6 +122,7 @@ typedef struct
 	uint16_t draft_order[16];   // ban turn order (peer ids, join order)
 	uint8_t  draft_order_count;
 	uint8_t  draft_turn;        // current index into draft_order
+	uint8_t  draft_selected;    // grid slot the turn player is hovering
 	uint8_t  draft_timer_sec;   // seconds left for the current pick
 	double   draft_timer;       // per-second accumulator
 
@@ -147,6 +156,8 @@ typedef struct
 	int8_t map;
 	bool started;
 	bool sudden_death;
+	// the match demo has already been uploaded to demos/ (one per match)
+	bool demo_stored;
 
 	double start_timeout;
 	double time;
@@ -158,6 +169,9 @@ typedef struct
 	BigRingState bring_state;
 	uint8_t bring_loc;
 	uint8_t jp_gamble_failed_rolls;
+	uint8_t jp_gamble_safe_rolls;
+	uint8_t jp_gamble_guarantee_rolls;
+	uint8_t jp_door_open_timer;
 	bool jp_gamble_opened;
 	uint16_t jp_door_ids[2];
 
@@ -237,6 +251,12 @@ bool server_host_kick(Server* server, const char* nick, const char* reason, char
 bool server_host_ban_udid(const char* udid, const char* dur, const char* reason, char* confirm, size_t cap);
 bool server_host_unban(const char* key, char* confirm, size_t cap);
 
+// admin actions on an online player (nick or account id, all lobbies searched):
+// kill = natural death with the 30s revive timer; demonize = forced demonize
+// bypassing the quota and the demonize toggle
+bool server_admin_kill(const char* key, char* confirm, size_t cap);
+bool server_admin_demonize(const char* key, char* confirm, size_t cap);
+
 // kick / op by account id (accid or udid): search across all lobbies
 bool server_host_kick_id(const char* id, const char* reason, char* confirm, size_t cap);
 bool server_host_op_id(const char* id, char* confirm, size_t cap);
@@ -247,6 +267,10 @@ bool server_broadcast_ex(Server *server, Packet *packet, bool reliable, uint16_t
 bool server_send_msg(Server *server, ENetPeer *peer, const char *message);
 bool server_broadcast_msg(Server *server, const char *message);
 bool game_broadcast_spectators(Server *server);
+
+// tells every client this peer has operator rights (the client shimmers op
+// nicknames with the colours embedded in the nick)
+bool server_broadcast_op(Server *server, PeerData *v);
 
 int server_total(Server *server);
 int server_ingame(Server *server);

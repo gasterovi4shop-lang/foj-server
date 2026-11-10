@@ -161,6 +161,16 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 		RAssert(server_msg_handle(v->server, type, v, packet));
 		break;
 
+	case CLIENT_DEMO_UP_BEGIN:
+	case CLIENT_DEMO_UP_CHUNK:
+	case CLIENT_DEMO_UP_END:
+		if (!v->server->game.started ||
+			v->server->game.demo_stored ||
+			v->id != v->server->game.exe)
+			return true;
+
+		return demo_upload_handle(v, type, packet);
+
 	case CLIENT_LOBBY_PLAYERS_REQUEST:
 	{
 		for (size_t i = 0; i < v->server->peers.capacity; i++)
@@ -188,6 +198,20 @@ bool lobby_state_handle(PeerData* v, Packet* packet)
 
 		PacketCreate(&pack, SERVER_LOBBY_CORRECT);
 		RAssert(packet_send(v->peer, &pack, true));
+
+		//catch the newcomer up on everyone who is already an operator
+		for (size_t i = 0; i < v->server->peers.capacity; i++)
+		{
+			PeerData* peer = (PeerData*)v->server->peers.ptr[i];
+			if (!peer || !peer->op)
+				continue;
+
+			PacketCreate(&pack, SERVER_OP_STATE);
+			PacketWrite(&pack, packet_write16, peer->id);
+			PacketWrite(&pack, packet_writestr, peer->nickname);
+			PacketWrite(&pack, packet_write8, peer->op);
+			RAssert(packet_send(v->peer, &pack, true));
+		}
 
 		char msg[100];
 		snprintf(msg, 100, "server " CLRCODE_RED "%d" CLRCODE_RST " of " CLRCODE_BLU "%d" CLRCODE_RST, v->server->id + 1, g_config.server_count);
@@ -692,13 +716,9 @@ bool lobby_state_tick(Server* server)
 
 			if (--server->lobby.countdown_sec == 0)
 			{
-				// a freshly voted draft reruns the ban phase instead
+				// an armed map draft replaces the 3 map vote
 				if (server->lobby.mapdraft)
 					return mapdraft_init(server) || lobby_init(server);
-
-				// a map picked by an earlier draft skips the 3 map vote
-				if (server->lobby.mapdraft_map >= 0)
-					return charselect_init(server->lobby.mapdraft_map, server) || lobby_init(server);
 
 				return mapvote_init(server) || lobby_init(server);
 			}

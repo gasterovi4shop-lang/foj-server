@@ -1,5 +1,6 @@
 #include <Log.h>
 #include <Admin.h>
+#include <Config.h>
 #include <States.h>
 #include <CMath.h>
 #include <Colors.h>
@@ -284,6 +285,23 @@ bool charselect_init(int8_t map, Server *server)
 {
 	Debug("Attepting to enter ST_CHARSELECT...");
 	RAssert(server);
+	// force-map: clean lobby return
+	// .map can be issued from any state (match, results, char select).
+	// Without SERVER_GAME_BACK_TO_LOBBY the clients inside another state
+	// never perform the lobby transition: they keep the old lvlId/nextMap
+	// and enter the forced map without its background and prolet intro.
+	if (server->state == ST_GAME || server->state == ST_RESULTS)
+	{
+		// матч или результаты: освобождаем сущности и возвращаемся в лобби,
+		// иначе старые entities остаются и роняют сервер
+		RAssert(game_uninit(server, false));
+	}
+	else if (server->state == ST_CHARSELECT)
+	{
+		Packet pack;
+		PacketCreate(&pack, SERVER_GAME_BACK_TO_LOBBY);
+		server_broadcast(server, &pack, true);
+	}
 
 	// any map drafted earlier is either used up or overridden
 	server->lobby.mapdraft_map = -1;

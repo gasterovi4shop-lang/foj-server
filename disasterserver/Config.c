@@ -1,4 +1,5 @@
 #include <Config.h>
+#include <Packet.h>
 #include <Log.h>
 #include <cJSON.h>
 #include <stdio.h>
@@ -46,7 +47,8 @@ cJSON*	g_ops = NULL;
 cJSON*	g_opids = NULL;
 cJSON*	g_custom_ids = NULL;
 cJSON*	g_whitelist = NULL;
-Mutex	g_banMut;
+	cJSON	*g_demos = NULL;
+Mutex	g_demoMut;Mutex	g_banMut;
 Mutex	g_timeoutMut;
 Mutex	g_opMut;
 
@@ -182,9 +184,11 @@ init_balls:
 	MutexCreate(g_timeoutMut);
 	MutexCreate(g_banMut);
 	MutexCreate(g_opMut);
+	MutexCreate(g_demoMut);
 
 	RAssert(collection_init(&g_timeouts,	TIMEOUTS_FILE,	"{}"));
 	RAssert(collection_init(&g_bans,		BANS_FILE,		"{}"));
+	RAssert(collection_init(&g_demos,		DEMOS_FILE,		"[]"));
 	RAssert(collection_init(&g_ops,		OPERATORS_FILE, "{ \"127.0.0.1\": \"Host (127.0.0.1)\" }"));
 	RAssert(collection_init(&g_opids,	OPERATOR_IDS_FILE, "{}"));
 	RAssert(collection_init(&g_custom_ids,	CUSTOM_IDS_FILE, "{}"));
@@ -285,6 +289,151 @@ bool ban_revoke(const char* udid, const char* ip)
 			res = collection_save(BANS_FILE, g_bans);
 	}
 	MutexUnlock(g_banMut);
+
+	return res;
+}
+
+static bool ci_equal(const char* a, const char* b)
+{
+	while (*a && *b)
+	{
+		if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+			return false;
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+
+// full unban: removes the entry keyed by the raw key plus every ban entry
+// whose stored nickname matches - a ban is written under several keys at once
+// (udid, ip, accid, custom_id), so revoking a single key left the other
+// entries alive and the player stayed banned (e.g. a permaban by ip)
+bool ban_revoke_all(const char* key, const char* nickname, int* removed)
+{
+	bool res = false;
+	int count = 0;
+
+	MutexLock(g_banMut);
+	{
+		bool changed = false;
+
+		if (key && key[0] && cJSON_HasObjectItem(g_bans, key))
+		{
+			cJSON_DeleteItemFromObject(g_bans, key);
+			changed = true;
+			count++;
+		}
+
+		// "unknown" is the placeholder nick of an offline .banid - never purge by it
+		if (nickname && nickname[0] && strcmp(nickname, "unknown") != 0)
+		{
+			cJSON* item = g_bans->child;
+			while (item)
+			{
+				cJSON* next = item->next;
+				const char* nick = NULL;
+				if (cJSON_IsString(item))
+					nick = cJSON_GetStringValue(item); // pre-1.2 format: the value is the nick
+				else
+					nick = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(item, "nickname"));
+
+				if (nick && nick[0] && ci_equal(nick, nickname))
+				{
+					cJSON_DeleteItemFromObject(g_bans, item->string);
+					changed = true;
+					count++;
+				}
+				item = next;
+			}
+		}
+
+		if (changed)
+			res = collection_save(BANS_FILE, g_bans);
+	}
+	MutexUnlock(g_banMut);
+
+	if (removed)
+		*removed = count;
+	return res;
+}
+
+// ����-���������: ������ ������� ����� (demos/ + Demos.json),
+// ����������� ��� �������� ����� ��������, �������� ����� API
+bool demos_add(const char* name, uint32_t size)
+{
+	MutexLock(g_demoMut);
+	{
+		cJSON* item = cJSON_CreateObject();
+		cJSON_AddStringToObject(item, "name", name);
+		cJSON_AddNumberToObject(item, "size", (double)size);
+		cJSON_AddNumberToObject(item, "time", (double)time(NULL));
+		cJSON_AddItemToArray(g_demos, item);
+	}
+	bool res = collection_save(DEMOS_FILE, g_demos);
+	MutexUnlock(g_demoMut);
+	return res;
+}
+
+bool demos_find(const char* name)
+{
+	bool found = false;
+
+	MutexLock(g_demoMut);
+	{
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, g_demos)
+		{
+			cJSON* nm = cJSON_GetObjectItemCaseSensitive(item, "name");
+			if (cJSON_IsString(nm) && strcmp(cJSON_GetStringValue(nm), name) == 0)
+			{
+				found = true;
+				break;
+			}
+		}
+	}
+	MutexUnlock(g_demoMut);
+	return found;
+}
+
+cJSON* demos_get(void)
+{
+	return g_demos;
+}
+
+bool demos_del(const char* name)
+{
+	// ������� ���� � ������ ������; ������ ������ ��������� ��� -
+	// ������ �� �������� ������������� ����� �� ����
+	if (!demos_find(name))
+		return false;
+
+	char path[sizeof("demos/") + DEMO_FILENAME_MAX];
+	snprintf(path, sizeof(path), "demos/%s", name);
+	remove(path);
+
+	bool res = false;
+
+	MutexLock(g_demoMut);
+	{
+		int index = 0;
+		cJSON* item = NULL;
+		cJSON_ArrayForEach(item, g_demos)
+		{
+			cJSON* nm = cJSON_GetObjectItemCaseSensitive(item, "name");
+			if (cJSON_IsString(nm) && strcmp(cJSON_GetStringValue(nm), name) == 0)
+			{
+				cJSON_DeleteItemFromArray(g_demos, index);
+				res = true;
+				break;
+			}
+			index++;
+		}
+
+		if (res)
+			res = collection_save(DEMOS_FILE, g_demos);
+	}
+	MutexUnlock(g_demoMut);
 
 	return res;
 }

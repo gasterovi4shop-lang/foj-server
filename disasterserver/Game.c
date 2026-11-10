@@ -9,7 +9,8 @@
 #include <Server.h>
 #include <Admin.h>
 #include <Palette.h>
-#include <Config.h>
+#include <stdio.h>
+#include <io/Dir.h>#include <Config.h>
 #include <Colors.h>
 #include <maps/JokerPalace.h>
 #include <entities/Ring.h>
@@ -21,6 +22,8 @@
 #include <entities/EggmanTracker.h>
 #include <entities/ExellerClone.h>
 #include <entities/DTStalactits.h>
+
+static void demo_upload_abort(PeerData* v);
 
 bool game_end(Server* server, Ending ending, bool achiv)
 {
@@ -115,6 +118,17 @@ bool game_init(int exe, int8_t map, Server* server)
 	Debug("Attepting to enter ST_GAME...");
 	RAssert(server_ingame(server) > 1);
 
+	for (size_t i = 0; i < server->peers.capacity; i++)
+	{
+		PeerData* peer = (PeerData*)server->peers.ptr[i];
+		if (!peer || (!peer->demo_up && !peer->demo_buf))
+			continue;
+
+		Warn("Aborting unfinished demo upload for new match: %s (%u/%u bytes)",
+			peer->demo_name, peer->demo_got, peer->demo_size);
+		demo_upload_abort(peer);
+	}
+
 	server->state = ST_GAME;
 	server->game = (Game)
 	{
@@ -123,6 +137,7 @@ bool game_init(int exe, int8_t map, Server* server)
 		.bring_state = BS_NONE,
 		.bring_loc = (uint8_t)rand(),
 		.sudden_death = false,
+		.demo_stored = false,
 		.started = false,
 		.end = 0.0,
 		.entid = 0,
@@ -553,6 +568,7 @@ bool game_state_left(PeerData* v)
 	PeerData* data = (PeerData*)malloc(sizeof(PeerData));
 	RAssert(data);
 	memcpy(data, v, sizeof(PeerData));
+	data->demo_buf = NULL; // ����� ����������� ���������, ���� �� ������ ��� �����������
 
 	// Add player to the list
 	SET_FLAG(data->plr.flags, PLAYER_LEFT);
@@ -565,14 +581,249 @@ bool game_state_left(PeerData* v)
 	return true;
 }
 
+// ���� ����-������ ����� ������� (������ <= 255 ����):
+// BEGIN(size, mapId, ticks) -> CHUNK(len, bytes)* -> END;
+static const char* demo_filename_utf8_error(const unsigned char* text, size_t len)
+{
+	for (size_t i = 0; i < len;)
+	{
+		unsigned char c = text[i];
+		if (c < 0x80)
+		{
+			if (c == '/' || c == '\\')
+				return "path separator";
+			if (c < 0x20 || c == 0x7F)
+				return "control character";
+			if (c == ':' || c == '<' || c == '>' || c == '"' ||
+				c == '|' || c == '?' || c == '*')
+				return "character is invalid in a filename";
+			i++;
+			continue;
+		}
+
+		size_t count;
+		uint32_t codepoint;
+		if (c >= 0xC2 && c <= 0xDF)
+		{
+			count = 2;
+			codepoint = c & 0x1F;
+		}
+		else if (c >= 0xE0 && c <= 0xEF)
+		{
+			count = 3;
+			codepoint = c & 0x0F;
+		}
+		else if (c >= 0xF0 && c <= 0xF4)
+		{
+			count = 4;
+			codepoint = c & 0x07;
+		}
+		else
+			return "invalid UTF-8";
+
+		if (i + count > len)
+			return "truncated UTF-8 sequence";
+		for (size_t j = 1; j < count; j++)
+		{
+			unsigned char next = text[i + j];
+			if ((next & 0xC0) != 0x80)
+				return "invalid UTF-8 continuation byte";
+			codepoint = (codepoint << 6) | (next & 0x3F);
+		}
+
+		if ((count == 2 && codepoint < 0x80) ||
+			(count == 3 && codepoint < 0x800) ||
+			(count == 4 && codepoint < 0x10000) ||
+			(codepoint >= 0xD800 && codepoint <= 0xDFFF) ||
+			codepoint > 0x10FFFF)
+			return "invalid UTF-8 code point";
+		if (codepoint >= 0x80 && codepoint <= 0x9F)
+			return "control character";
+		i += count;
+	}
+
+	return NULL;
+}
+
+static const char* demo_filename_error(const char* name, size_t len)
+{
+	static const char extension[] = ".fojd";
+	if (len == 0)
+		return "empty filename";
+	if (len > DEMO_FILENAME_MAX)
+		return "filename exceeds 255 UTF-8 bytes";
+	if (len <= sizeof(extension) - 1)
+		return "empty basename";
+	if (name[len - 1] == '.' || name[len - 1] == ' ')
+		return "filename ends with a dot or space";
+	if (memcmp(name + len - (sizeof(extension) - 1), extension, sizeof(extension) - 1) != 0)
+		return "filename does not end in .fojd";
+	if (strstr(name, ".."))
+		return "filename contains '..'";
+	return demo_filename_utf8_error((const unsigned char*)name, len);
+}
+
+static void demo_upload_abort(PeerData* v)
+{
+	free(v->demo_buf);
+	v->demo_buf = NULL;
+	v->demo_up = false;
+	v->demo_size = 0;
+	v->demo_got = 0;
+	v->demo_name[0] = '\0';
+}
+
+// ���� ������� � demos/, ���������� - � Demos.json (������ ��� ����)
+bool demo_upload_handle(PeerData * v, uint8_t type, Packet * packet)
+{
+	switch (type)
+	{
+		case CLIENT_DEMO_UP_BEGIN:
+		{
+			if (packet->len > PACKET_MAXSIZE || packet->pos > packet->len ||
+				packet->len - packet->pos < 9)
+				return true;
+
+			PacketRead(size, packet, packet_read32, uint32_t);
+			PacketRead(mapId, packet, packet_read8, uint8_t);
+			PacketRead(ticks, packet, packet_read32, uint32_t);
+
+			char requested_name[sizeof(v->demo_name)];
+			bool has_valid_name = false;
+			const char* name_error = NULL;
+			size_t name_len = 0;
+			if (packet->pos < packet->len)
+			{
+				uint16_t start = packet->pos;
+				while (packet->pos < packet->len && packet->buff[packet->pos] != '\0')
+					packet->pos++;
+				name_len = packet->pos - start;
+				if (packet->pos < packet->len && packet->pos + 1 == packet->len)
+				{
+					name_error = demo_filename_error((const char*)&packet->buff[start], name_len);
+					if (!name_error)
+					{
+						memcpy(requested_name, &packet->buff[start], name_len);
+						requested_name[name_len] = '\0';
+						has_valid_name = true;
+					}
+				}
+				else if (packet->pos == packet->len)
+					name_error = "missing NUL terminator";
+				else
+					name_error = "trailing bytes after NUL terminator";
+			}
+			else
+				name_error = "name omitted (legacy packet)";
+
+			// ���� ������ �� ����: ��������� ������ ����� ���������, ����
+			// ����� ����� ����� �� ��������� (��������� ������� ����� � �������)
+			if (size == 0 || size > 64 * 1024 * 1024)
+				return true;
+			if (v->server->game.demo_stored || v->id != v->server->game.exe)
+				return true;
+
+			if (v->demo_buf)
+			{
+				free(v->demo_buf);
+				v->demo_buf = NULL;
+			}
+			v->demo_up = false;
+
+			v->demo_buf = (uint8_t *)malloc(size);
+			if (!v->demo_buf)
+				return true;
+
+			v->demo_up = true;
+			v->demo_size = size;
+			v->demo_got = 0;
+			if (has_valid_name)
+				snprintf(v->demo_name, sizeof(v->demo_name), "%s", requested_name);
+			else
+			{
+				Warn("Demo upload filename unavailable (%s, %zu bytes); using generated name.",
+					name_error ? name_error : "invalid name", name_len);
+				snprintf(v->demo_name, sizeof(v->demo_name), "demo_%lld_m%d_t%lld",
+					(long long)time(NULL), (int)mapId, (long long)ticks);
+			}
+			Info("Demo upload started: %s (%u bytes)", v->demo_name, size);
+			return true;
+		}
+
+		case CLIENT_DEMO_UP_CHUNK:
+		{
+			if (!v->demo_up || !v->demo_buf)
+				return true;
+
+			if (packet->pos > packet->len || packet->len - packet->pos < 2)
+			{
+				demo_upload_abort(v);
+				return true;
+			}
+
+			PacketRead(len, packet, packet_read16, uint16_t);
+			if (len == 0 || len > PACKET_MAXSIZE - 4 ||
+				packet->pos > packet->len || packet->len - packet->pos != len ||
+				v->demo_got > v->demo_size || len > v->demo_size - v->demo_got)
+			{
+				demo_upload_abort(v);
+				return true;
+			}
+
+			memcpy(v->demo_buf + v->demo_got, packet->buff + packet->pos, len);
+			v->demo_got += len;
+			return true;
+		}
+
+		case CLIENT_DEMO_UP_END:
+		{
+			if (!v->demo_up || !v->demo_buf || v->demo_got != v->demo_size)
+			{
+				demo_upload_abort(v);
+				return true;
+			}
+
+			mkdir("demos", 0700);
+			char path[sizeof("demos/") + DEMO_FILENAME_MAX];
+			snprintf(path, sizeof(path), "demos/%s", v->demo_name);
+			FILE *fp = fopen(path, "wb");
+			if (fp)
+			{
+				fwrite(v->demo_buf, 1, v->demo_size, fp);
+				fclose(fp);
+				demos_add(v->demo_name, v->demo_size);
+				Info("Demo uploaded: %s (%u bytes)", path, v->demo_size);
+				v->server->game.demo_stored = true;
+			}
+
+			free(v->demo_buf);
+			v->demo_buf = NULL;
+			v->demo_up = false;
+			v->demo_size = 0;
+			v->demo_got = 0;
+			v->demo_name[0] = '\0';
+			return true;
+		}
+	}
+
+	return false;
+}
+
 bool game_state_handletcp(PeerData* v, Packet* packet)
 {
+	if (packet->pos > packet->len || packet->len - packet->pos < 2)
+		return true;
+
 	// Read header
 	PacketRead(passtrough, packet, packet_read8, uint8_t);
 	PacketRead(type, packet, packet_read8, uint8_t);
 
 	switch (type)
 	{
+		case CLIENT_DEMO_UP_BEGIN:
+		case CLIENT_DEMO_UP_CHUNK:
+		case CLIENT_DEMO_UP_END:
+			return demo_upload_handle(v, type, packet);
 	default:
 		RAssert(server_msg_handle(v->server, type, v, packet));
 		break;
@@ -848,7 +1099,7 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 			return true;
 		}
 
-		if (rings >= 140 && v->server->game.map != 20)
+		if (rings >= 140 && v->server->game.map != 20 && v->server->game.map != MAP_PRACTICE)
 		{
 			server_disconnect(v->server, v->peer, DR_OTHER, "dicus");
 			return true;
@@ -870,7 +1121,7 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 			return true;
 		}
 
-		if (rings >= 140 && v->server->game.map != 20)
+		if (rings >= 140 && v->server->game.map != 20 && v->server->game.map != MAP_PRACTICE)
 		{
 			server_disconnect(v->server, v->peer, DR_OTHER, "dicus");
 			return true;
@@ -1589,7 +1840,9 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 					v->plr.rings = rings;
 					if (revival < 2)
 					{
-						if (rings < 0 || (v->server->game.map != 20 && rings >= 120))
+						//Joker's Palace (20) и Fart Zone (MAP_PRACTICE): автоматы сыплют
+						//кольца, обычный лимит 120 там не действует
+						if (rings < 0 || (v->server->game.map != 20 && v->server->game.map != MAP_PRACTICE && rings >= 120))
 						{
 							server_disconnect(v->server, v->peer, DR_OTHER, "gomunkulus");
 							return true;
@@ -1720,7 +1973,9 @@ bool game_state_handletcp(PeerData* v, Packet* packet)
 			}
 		}
 
-		if (v->plr.state != state || time_end(&v->plr.last_packet) >= 15 * 2.9)
+		// 8 ticks (~7.5 Hz per player): frequent enough for smooth spectator and
+		// demo playback, still a fraction of the old 43.5-tick throttle
+		if (v->plr.state != state || time_end(&v->plr.last_packet) >= 8)
 		{
 			v->plr.state = state;
 			time_start(&v->plr.last_packet);

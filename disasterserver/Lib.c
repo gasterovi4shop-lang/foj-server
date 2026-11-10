@@ -189,6 +189,7 @@ bool disaster_server_op(Server* server, uint16_t id)
 		{
 			v->op = true;
 
+			server_broadcast_op(server, v);
 			server_send_msg(server, v->peer, CLRCODE_GRN "you're an operator now");
 			return op_add(v->nickname.value, v->ip.value);
 		}

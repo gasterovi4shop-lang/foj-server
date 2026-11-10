@@ -10,8 +10,6 @@
 #define JP_GAMBLE_RING_COST 3
 #define JP_GAMBLE_SHARD_COST 1
 #define JP_GAMBLE_UNLOCK_TIME (2 * TICKSPERSEC - 30)
-#define JP_GAMBLE_SAFE_ROLLS 5
-#define JP_GAMBLE_GUARANTEE_ROLL 10
 #define JP_SHARD_COUNT 64
 
 enum
@@ -47,27 +45,56 @@ static bool jp_machine_pos(uint16_t x, uint16_t y)
 	return false;
 }
 
+//таблица выпадения, когда джекпот сейчас невозможен (двери заблокированы).
+//33/12/13/12/13/18 — сумма 101, поэтому бросок делается из 101 значения
+static uint8_t jp_roll_common(void)
+{
+	uint8_t roll = rand() % 101;
+	if (roll < 33)
+		return JP_GAMBLE_NOTHING;    //33%
+	if (roll < 45)
+		return JP_GAMBLE_FIVE_RINGS; //12%
+	if (roll < 58)
+		return JP_GAMBLE_RED_RING;   //13%
+	if (roll < 70)
+		return JP_GAMBLE_SPEED;      //12%
+	if (roll < 83)
+		return JP_GAMBLE_SLOW;       //13%
+
+	return JP_GAMBLE_DAMAGE;         //18%
+}
+
 static uint8_t jp_roll_result(Server* server)
 {
-	if (!server->game.jp_gamble_opened && server->game.jp_gamble_failed_rolls + 1 >= JP_GAMBLE_GUARANTEE_ROLL)
-		return JP_GAMBLE_JACKPOT;
+	bool opened = server->game.jp_gamble_opened;
 
-	if (!server->game.jp_gamble_opened && server->game.jp_gamble_failed_rolls >= JP_GAMBLE_SAFE_ROLLS && (rand() % 100) < 12)
+	//после N круток двери гарантированно открываются (пока не открыты)
+	if (!opened && server->game.jp_gamble_failed_rolls + 1 >= server->game.jp_gamble_guarantee_rolls)
 		return JP_GAMBLE_JACKPOT;
 
 	uint8_t roll = rand() % 100;
-	if (roll < 20)
-		return JP_GAMBLE_NOTHING;
-	if (roll < 45)
-		return JP_GAMBLE_FIVE_RINGS;
-	if (roll < 58)
-		return JP_GAMBLE_RED_RING;
-	if (roll < 73)
-		return JP_GAMBLE_SPEED;
-	if (roll < 88)
-		return JP_GAMBLE_SLOW;
 
-	return JP_GAMBLE_DAMAGE;
+	//в первые M круток двери открыться не могут; когда двери уже открыты,
+	//джекпот тоже заменяется обычной наградой — автомат продолжает работать
+	if (roll >= 90 && (opened || server->game.jp_gamble_failed_rolls < server->game.jp_gamble_safe_rolls))
+		return jp_roll_common();
+
+	//обычная таблица: 30% ничего, 10% кольца, 12% красное кольцо, 11% ускорение,
+	//12% замедление, 15% урон, 10% джекпот
+	if (roll < 30)
+		return JP_GAMBLE_NOTHING;
+	if (roll < 40)
+		return JP_GAMBLE_FIVE_RINGS;
+	if (roll < 52)
+		return JP_GAMBLE_RED_RING;
+	if (roll < 63)
+		return JP_GAMBLE_SPEED;
+	if (roll < 75)
+		return JP_GAMBLE_SLOW;
+	if (roll < 90)
+		return JP_GAMBLE_DAMAGE;
+
+	return JP_GAMBLE_JACKPOT;
 }
 
 static JPShard* jp_find_shard(Server* server, uint16_t eid)
@@ -161,6 +188,45 @@ bool jp_init(Server* server)
 	RAssert(game_spawn(server, (Entity*)&(MakeSpike()), sizeof(SpikeController), NULL));
 	server->game.jp_gamble_failed_rolls = 0;
 	server->game.jp_gamble_opened = false;
+	server->game.jp_door_open_timer = 0;
+
+	//пороги круток зависят от числа выживших (без учёта exe), как и бонус времени
+	int survs = server_ingame(server) - 1;
+	if (survs < 2)
+		survs = 2;
+	if (survs > 6)
+		survs = 6;
+
+	switch (survs)
+	{
+		case 2:
+			server->game.jp_gamble_safe_rolls = 5;
+			server->game.jp_gamble_guarantee_rolls = 8;
+			break;
+
+		case 3:
+			server->game.jp_gamble_safe_rolls = 7;
+			server->game.jp_gamble_guarantee_rolls = 10;
+			break;
+
+		case 4:
+			server->game.jp_gamble_safe_rolls = 9;
+			server->game.jp_gamble_guarantee_rolls = 12;
+			break;
+
+		case 5:
+			server->game.jp_gamble_safe_rolls = 10;
+			server->game.jp_gamble_guarantee_rolls = 13;
+			break;
+
+		default: //6 и больше
+			server->game.jp_gamble_safe_rolls = 13;
+			server->game.jp_gamble_guarantee_rolls = 16;
+			break;
+	}
+
+	Info("[JP] survivors %d, safe rolls %d, guarantee rolls %d", survs,
+		(int)server->game.jp_gamble_safe_rolls, (int)server->game.jp_gamble_guarantee_rolls);
 	server->game.jp_door_ids[0] = 0;
 	server->game.jp_door_ids[1] = 0;
 
@@ -178,6 +244,10 @@ bool jp_init(Server* server)
 
 bool jp_tick(Server* server)
 {
+	//отложенное открытие дверей после джекпота
+	if (server->game.jp_door_open_timer > 0 && --server->game.jp_door_open_timer == 0)
+		RAssert(jp_open(server));
+
 	//зелёное кольцо появляется в 1:00 по таймеру (закрытое, неактивное)
 	if (server->game.time_sec <= TICKSPERSEC && server->game.bring_state < BS_DEACTIVATED)
 		RAssert(game_bigring(server, BS_DEACTIVATED));
@@ -207,7 +277,9 @@ bool jp_tcpmsg(PeerData* v, Packet* packet)
 			if (v->server->game.time_sec > JP_GAMBLE_UNLOCK_TIME)
 				break;
 
-			if (v->server->game.jp_gamble_opened)
+			//после джекпота автоматы продолжают работать; блокируется только
+			//окно, пока двери ещё открываются
+			if (v->server->game.jp_door_open_timer > 0)
 				break;
 
 			if (v->plr.flags & (PLAYER_DEAD | PLAYER_DEMONIZED | PLAYER_ESCAPED))
@@ -237,7 +309,9 @@ bool jp_tcpmsg(PeerData* v, Packet* packet)
 
 			if (result == JP_GAMBLE_JACKPOT)
 			{
-				RAssert(jp_open(v->server));
+				//двери открываются с задержкой: как только автомат закончит
+				//прокрутку (72 тика, как у выдачи остальных призов)
+				v->server->game.jp_door_open_timer = 72;
 			}
 			else
 			{

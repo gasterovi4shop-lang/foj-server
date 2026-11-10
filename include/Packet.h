@@ -4,6 +4,8 @@
 #include <enet/enet.h>
 #include <stdint.h>
 
+#define DEMO_FILENAME_MAX 255
+
 typedef enum
 {
 	IDENTITY,
@@ -199,16 +201,52 @@ typedef enum
 
 	// u16 pid, u8 enabled: a player toggled afk mode with .afk; appended at
 	// the end so older clients just ignore the unknown type
-	SERVER_AFK_STATE
+	SERVER_AFK_STATE,
+
+	// u16 pid, string nick, u8 op: player has operator rights (sent on join,
+	// on roster request and when an op is granted); the client caches it by
+	// nickname; appended at the end so older clients just ignore the unknown
+	// type
+	SERVER_OP_STATE,
+
+	// map draft grid: no payload, opens the ban grid on the clients;
+	// appended at the end so older clients just ignore the unknown type
+	SERVER_DRAFT_START,
+
+	// map draft grid: 3 bytes banned bitfield (bit i = map i is banned),
+	// u16 turn id, u8 selected slot; doubles as the initial state right
+	// after SERVER_DRAFT_START; appended at the end so older clients just
+	// ignore the unknown type
+	SERVER_DRAFT_STATE,
+
+	// u8 slot: the draft turn player moved the grid cursor
+	CLIENT_DRAFT_SELECT,
+
+	// u8 slot: the draft turn player bans this map
+	CLIENT_DRAFT_BAN,
+
+	SERVER_DRAFT_EVENT,
+
+	// u8 kind (0 = action: "X banned Y" / "X skipped the turn", 1 = turn
+	// status: "X is choosing a map to ban") + string, drawn centered under
+	// the ban grid; appended at the end so older clients just ignore the
+	// unknown type
+	// match demo upload to the server storage (demos/): the client streams
+	// the .fojd file in chunks after the match ends; chunked because packets
+	// are capped at 255 bytes; appended at the end so older clients just
+	// ignore the unknown types
+	CLIENT_DEMO_UP_BEGIN, // u32 size, u8 mapId, u32 ticks, optional NUL-terminated UTF-8 basename
+	CLIENT_DEMO_UP_CHUNK, // u16 len + len raw bytes
+	CLIENT_DEMO_UP_END    // no payload: the upload is complete
 } PacketType;
 
 typedef struct
 {
-	#define PACKET_MAXSIZE 256
+	#define PACKET_MAXSIZE 4096
 
 	uint8_t buff[PACKET_MAXSIZE];
-	uint8_t pos;
-	uint8_t len;
+	uint16_t pos;
+	uint16_t len;
 } Packet;
 
 /* UTF-8 supporting string */

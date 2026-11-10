@@ -643,6 +643,7 @@ bool ui_button_op(struct _Component* component)
 			
 			peer->op = true;
 
+			server_broadcast_op(server, peer);
 			server_send_msg(server, peer->peer, CLRCODE_GRN "you're an operator now");
 			res = op_add(peer->nickname.value, peer->ip.value);
 		}

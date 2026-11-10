@@ -5,6 +5,8 @@
 #include <Config.h>
 #include <Colors.h>
 #include <States.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 #define PLRSTATE_ESCAPED 4
 #define PLRSTATE_ALIVE 3
@@ -302,16 +304,44 @@ bool results_state_tick(Server* server)
 
 bool results_state_handle(PeerData* v, Packet* packet)
 {
+	if (packet->pos > packet->len || packet->len - packet->pos < 2)
+		return true;
+
 	PacketRead(_passtrough, packet, packet_read8, uint8_t);
 	PacketRead(type, packet, packet_read8, uint8_t);
 
 	switch (type) 
 	{
+		case CLIENT_DEMO_UP_BEGIN:
+		case CLIENT_DEMO_UP_CHUNK:
+		case CLIENT_DEMO_UP_END:
+			return demo_upload_handle(v, type, packet);
+
 		case CLIENT_RESULTS_REQUEST:
 		{
-			PeerData* sort[7];
-			int len = 0;
-			memset(sort, 0, sizeof(PeerData*) * 7);
+			size_t peer_capacity = v->server->peers.capacity;
+			size_t left_capacity = v->server->game.left.capacity;
+			if (left_capacity > SIZE_MAX - peer_capacity)
+			{
+				Err("Results roster capacity overflow.");
+				return false;
+			}
+
+			size_t sort_capacity = peer_capacity + left_capacity;
+			if (sort_capacity > SIZE_MAX / sizeof(PeerData*))
+			{
+				Err("Results roster allocation size overflow.");
+				return false;
+			}
+
+			PeerData** sort = (PeerData**)malloc((sort_capacity ? sort_capacity : 1) * sizeof(*sort));
+			if (!sort)
+			{
+				Err("Failed to allocate Results roster.");
+				return false;
+			}
+
+			size_t len = 0;
 
 			for (size_t i = 0; i < v->server->peers.capacity; i++)
 			{
@@ -322,6 +352,8 @@ bool results_state_handle(PeerData* v, Packet* packet)
 				if(!data->in_game)
 					continue;
 
+				if (len >= sort_capacity)
+					break;
 				sort[len++] = data;
 			}
 
@@ -334,11 +366,13 @@ bool results_state_handle(PeerData* v, Packet* packet)
 				if(!data->in_game)
 					continue;
 
+				if (len >= sort_capacity)
+					break;
 				sort[len++] = data;
 			}
 
-			qsort(sort, len, sizeof(PeerData*), (int (*)(const void *, const void *))compare);
-			qsort(sort, len, sizeof(PeerData*), (int (*)(const void *, const void *))compare2);
+			qsort(sort, len, sizeof(sort[0]), (int (*)(const void *, const void *))compare);
+			qsort(sort, len, sizeof(sort[0]), (int (*)(const void *, const void *))compare2);
 
 			for (size_t i = 0; i < len; i++)
 			{
@@ -346,8 +380,14 @@ bool results_state_handle(PeerData* v, Packet* packet)
 				if (!data)
 					continue;
 
-				RAssert(results_send(v->server, v, data, data->plr.flags & PLAYER_LEFT));
+				if (!results_send(v->server, v, data, data->plr.flags & PLAYER_LEFT))
+				{
+					free(sort);
+					Err("Failed to send Results data.");
+					return false;
+				}
 			}
+			free(sort);
 			break;
 		}
 		
