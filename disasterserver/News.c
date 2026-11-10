@@ -123,7 +123,7 @@ static void news_client_thread(void* arg)
 			// весь ответ собирается в один буфер и уходит ОДНИМ send():
 			// GameMaker стабильно обрабатывает один data-event на пакет,
 			// а россыпь мелких send-ов по реальной сети терялась
-			size_t cap = 160 + (size_t)count * 6400;
+			size_t cap = 1620 + (size_t)count * 6400;
 			char* resp = (char*)malloc(cap);
 
 			if (!resp)
@@ -161,6 +161,16 @@ static void news_client_thread(void* arg)
 			{
 				memcpy(resp + ro, "END\n", 4);
 				ro += 4;
+			}
+
+			//хвост-заполнитель: GameMaker не генерирует data-event на последний
+			//маленький TCP-сегмент ответа, и без заполнителя терялся бы конец
+			//последней записи вместе с END. Заполнитель из '\n' принимает
+			//потерю на себя (1460 >= MSS): клиент такие пустые строки игнорирует
+			if (ro + 1460 < cap)
+			{
+				memset(resp + ro, '\n', 1460);
+				ro += 1460;
 			}
 
 			send_all(sock, resp, ro);
